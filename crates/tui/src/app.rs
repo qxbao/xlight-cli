@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use xlightcli_protocol::{AgentId, SessionId, ToolCallId};
+use xlightcli_protocol::{AgentId, ModelId, ProviderId, SessionId, ToolCallId, TransportId};
 use xlightcli_runtime::{ExecutionMode, PermissionResponse, RuntimeHandle, UiEvent};
 
 use crate::input;
@@ -20,7 +20,7 @@ use crate::keymap::{Action, Keymap};
 use crate::theme::Theme;
 use crate::view::{
     CommandPaletteView, DiffView, PermissionChoice, PermissionDialogView, PromptView,
-    StatusLineView, TranscriptView,
+    SessionSetupView, SetupStage, StatusLineView, TranscriptView,
 };
 
 /// Which overlay (if any) is currently shown on top of the transcript/prompt.
@@ -31,6 +31,7 @@ pub enum Overlay {
     CommandPalette(CommandPaletteView),
     Permission(PermissionDialogView),
     Diff(DiffView),
+    SessionSetup(SessionSetupView),
 }
 
 /// What `App::on_key` decided should happen, translated into a `RuntimeHandle` call by
@@ -48,6 +49,10 @@ pub enum Intent {
     RespondPermission(ToolCallId, PermissionResponse),
     CancelTurn,
     SetExecutionMode(ExecutionMode),
+    SelectProvider(ProviderId),
+    SelectTransport(ProviderId, TransportId),
+    SelectModel(ProviderId, TransportId, ModelId),
+    SetupBack(SetupStage),
 }
 
 pub struct App {
@@ -61,8 +66,7 @@ pub struct App {
     pub execution_mode: ExecutionMode,
     pub should_quit: bool,
     /// The session `Submit`/`RunCommand`/`CancelTurn` target — set from `UiEvent::SessionChanged`/
-    /// `TurnStarted`. `None` until the frontend (bare TUI entry point, or a future session picker)
-    /// has created or resumed one — see the Wave B report's "known gaps" section.
+    /// `TurnStarted`. `None` while the initial session picker is open.
     pub session_id: Option<SessionId>,
     /// True right after a first `Ctrl+C`, waiting for a second one within the same "no other key
     /// pressed" window (docs/PLAN.md §18.2 brief: "Ctrl+C twice exits").
@@ -70,6 +74,8 @@ pub struct App {
     /// Set by any state change; `crate::run`'s event loop redraws when true and clears it,
     /// implementing the "never redraw per delta, only on a frame-rate-capped tick" requirement.
     pub dirty: bool,
+    /// Set before spawning a turn so a rapid second Enter cannot start another one.
+    pub turn_in_flight: bool,
     running_agents: BTreeSet<AgentId>,
     all_agents: BTreeSet<AgentId>,
 }
@@ -99,6 +105,7 @@ impl App {
             session_id: None,
             quit_confirm_pending: false,
             dirty: true,
+            turn_in_flight: false,
             running_agents: BTreeSet::new(),
             all_agents: BTreeSet::new(),
         }
@@ -162,12 +169,14 @@ impl App {
                 }
             }
             UiEvent::TurnCompleted { agent_id, stop } => {
+                self.turn_in_flight = false;
                 self.running_agents.remove(&agent_id);
                 self.sync_agent_counts();
                 self.transcript
                     .push_notice(format!("turn completed: {stop:?}"));
             }
             UiEvent::TurnFailed { agent_id, error } => {
+                self.turn_in_flight = false;
                 self.running_agents.remove(&agent_id);
                 self.sync_agent_counts();
                 self.transcript.push_error(error);
@@ -231,6 +240,7 @@ impl App {
             Overlay::Permission(view) => self.handle_permission_key(view, key),
             Overlay::CommandPalette(view) => self.handle_palette_key(view, key),
             Overlay::Diff(view) => self.handle_diff_key(view, key),
+            Overlay::SessionSetup(view) => self.handle_setup_key(view, key),
             Overlay::None => self.handle_normal_key(key),
         };
         self.overlay = overlay;
@@ -259,14 +269,19 @@ impl App {
                 // rather than falling through to text insertion.
                 Action::OpenAgentTree => return (Overlay::None, Intent::None),
                 Action::ScrollTranscriptUp => {
-                    self.transcript.scroll_up(3);
+                    self.transcript.scroll_up(10);
                     return (Overlay::None, Intent::None);
                 }
                 Action::ScrollTranscriptDown => {
-                    self.transcript.scroll_down(3);
+                    self.transcript.scroll_down(10);
                     return (Overlay::None, Intent::None);
                 }
                 Action::Submit => {
+                    if self.turn_in_flight {
+                        self.transcript
+                            .push_notice("Wait for the current turn to finish.");
+                        return (Overlay::None, Intent::None);
+                    }
                     let text = self.prompt.take();
                     if text.trim().is_empty() {
                         return (Overlay::None, Intent::None);
@@ -340,19 +355,10 @@ impl App {
                 Overlay::None,
                 Intent::RespondPermission(call_id, PermissionResponse::Allow),
             ),
-            PermissionChoice::AlwaysAllow => {
-                // Known gap (Wave B, see view::permission_dialog's module doc): there is no
-                // `RuntimeHandle` call yet to persist a new allow rule, so this only answers the
-                // one pending request and says so — never silently drops the "always" intent
-                // (INV-10).
-                self.transcript.push_notice(
-                    "allowed once; persisting an always-allow rule isn't wired up yet",
-                );
-                (
-                    Overlay::None,
-                    Intent::RespondPermission(call_id, PermissionResponse::Allow),
-                )
-            }
+            PermissionChoice::AlwaysAllow => (
+                Overlay::None,
+                Intent::RespondPermission(call_id, PermissionResponse::AllowAlways),
+            ),
             PermissionChoice::Deny => (
                 Overlay::None,
                 Intent::RespondPermission(call_id, PermissionResponse::Deny),
@@ -413,6 +419,76 @@ impl App {
         }
     }
 
+    fn handle_setup_key(&mut self, mut view: SessionSetupView, key: KeyEvent) -> (Overlay, Intent) {
+        match key.code {
+            KeyCode::Up => {
+                view.select_prev();
+                (Overlay::SessionSetup(view), Intent::None)
+            }
+            KeyCode::Down => {
+                view.select_next();
+                (Overlay::SessionSetup(view), Intent::None)
+            }
+            KeyCode::Backspace if matches!(view.stage, SetupStage::Model { .. }) => {
+                view.model_id_input.pop();
+                (Overlay::SessionSetup(view), Intent::None)
+            }
+            KeyCode::Char(c)
+                if matches!(view.stage, SetupStage::Model { .. })
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                view.model_id_input.push(c);
+                (Overlay::SessionSetup(view), Intent::None)
+            }
+            KeyCode::Esc => match &view.stage {
+                SetupStage::Provider => (Overlay::None, Intent::Quit),
+                SetupStage::Transport { .. } => {
+                    (Overlay::None, Intent::SetupBack(SetupStage::Provider))
+                }
+                SetupStage::Model { provider, .. } => (
+                    Overlay::None,
+                    Intent::SetupBack(SetupStage::Transport {
+                        provider: provider.clone(),
+                    }),
+                ),
+            },
+            KeyCode::Enter => {
+                let typed = if matches!(view.stage, SetupStage::Model { .. })
+                    && !view.model_id_input.is_empty()
+                {
+                    match view.typed_model_id() {
+                        Some(id) => Some(id.to_string()),
+                        None => return (Overlay::SessionSetup(view), Intent::None),
+                    }
+                } else {
+                    view.selected_id().map(str::to_string)
+                };
+                let Some(id) = typed else {
+                    return (Overlay::SessionSetup(view), Intent::None);
+                };
+                let intent = match &view.stage {
+                    SetupStage::Provider => Intent::SelectProvider(ProviderId::new(&id)),
+                    SetupStage::Transport { provider } => {
+                        Intent::SelectTransport(provider.clone(), TransportId::new(&id))
+                    }
+                    SetupStage::Model {
+                        provider,
+                        transport,
+                    } => {
+                        Intent::SelectModel(provider.clone(), transport.clone(), ModelId::new(&id))
+                    }
+                };
+                (Overlay::None, intent)
+            }
+            _ => (Overlay::SessionSetup(view), Intent::None),
+        }
+    }
+
+    pub fn open_session_setup(&mut self, stage: SetupStage, options: Vec<(String, String)>) {
+        self.overlay = Overlay::SessionSetup(SessionSetupView::new(stage, options));
+        self.dirty = true;
+    }
+
     /// Opens the diff overlay directly (used by `crate::run`'s `/diff` handling and by tests).
     pub fn open_diff(&mut self, view: DiffView) {
         self.overlay = Overlay::Diff(view);
@@ -447,6 +523,7 @@ impl App {
                 view.render(frame, area, &self.theme, &entries);
             }
             Overlay::Diff(view) => view.render(frame, area, &self.theme),
+            Overlay::SessionSetup(view) => view.render(frame, area, &self.theme),
             Overlay::None => {}
         }
     }
@@ -544,6 +621,25 @@ mod tests {
         let (mut app, _dir) = test_app().await;
         let intent = app.on_key(key(KeyCode::Esc));
         assert_eq!(intent, Intent::CancelTurn);
+    }
+
+    #[tokio::test]
+    async fn page_keys_scroll_the_transcript_in_opposite_directions() {
+        let (mut app, _dir) = test_app().await;
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.transcript.scroll_offset, 10);
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.transcript.scroll_offset, 0);
+    }
+
+    #[tokio::test]
+    async fn second_submit_keeps_the_draft_while_a_turn_runs() {
+        let (mut app, _dir) = test_app().await;
+        app.turn_in_flight = true;
+        app.prompt.buffer = "next request".to_string();
+        let intent = app.on_key(key(KeyCode::Enter));
+        assert_eq!(intent, Intent::None);
+        assert_eq!(app.prompt.buffer, "next request");
     }
 
     #[tokio::test]

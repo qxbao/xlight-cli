@@ -95,8 +95,9 @@ clap = { version = "4.6.7", features = ["derive"] }
 open = "5.4.4"
 
 # --- TUI (Phase 1, Wave A addition: ratatui + crossterm, D-005) ---
-ratatui = "0.29.0"
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.28.1", features = ["event-stream"] }
+pulldown-cmark = "0.13.0"
 
 # --- tools: fs search, diff, process groups (Phase 1, Wave A addition) ---
 # `ignore`/`globset`/`grep-*`: gitignore-aware walk + glob + grep as libraries (D-013 — never

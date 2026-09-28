@@ -29,22 +29,17 @@ pub(crate) mod gemini_api {
 /// (docs/PLAN.md §4.5), not independently confirmed against a live Google account. Re-check with a
 /// live spike before shipping (docs/providers/agy.md checklist).
 pub(crate) mod antigravity {
-    /// OAuth client id embedded in the (public, non-secret) Antigravity desktop client.
-    /// Source: `src/oauth/google-antigravity.ts`.
-    pub(crate) const OAUTH_CLIENT_ID: &str =
-        "<antigravity-oauth-client-id: not committed>";
-    /// Public OAuth client "secret" (not a user secret; embedded in the desktop client the same
-    /// way `OAUTH_CLIENT_ID` is). Source: `src/oauth/google-antigravity.ts`.
+    /// Env var holding the OAuth client id of the Antigravity desktop client.
     ///
-    /// **Currently unused, on purpose — a second contract gap flagged in the Wave 2 report**:
-    /// `xlightcli_auth::oauth::exchange_code_for_token`/`refresh_access_token` (docs/CONTRACTS.md
-    /// §2) take no `client_secret` parameter, but Google's token endpoint for this "Desktop app"
-    /// OAuth client type still expects one in the code-exchange/refresh body (the real Antigravity
-    /// client sends it). There is currently no way to thread it through those shared helpers
-    /// without changing their signature, so it stays defined here (for when that lands) rather
-    /// than hand-rolling the HTTP call and bypassing the shared refresh/single-flight machinery.
-    #[allow(dead_code)]
-    pub(crate) const OAUTH_CLIENT_SECRET: &str = "<antigravity-oauth-client-secret: not committed>";
+    /// The id/secret pair is deliberately **not** shipped in this repo: it belongs to Google's
+    /// Antigravity client, not to xlightcli, and GitHub push protection flags it as a leaked
+    /// Google OAuth credential. Users who opt into this experimental transport supply it
+    /// themselves; see `docs/providers/agy.md` ("OAuth client") for where the public values come
+    /// from.
+    pub(crate) const OAUTH_CLIENT_ID_ENV: &str = "XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_ID";
+    /// Env var holding the matching OAuth client secret (a "Desktop app" client secret: public,
+    /// not a user secret, but still never committed; see `OAUTH_CLIENT_ID_ENV`).
+    pub(crate) const OAUTH_CLIENT_SECRET_ENV: &str = "XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 
     pub(crate) const GOOGLE_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
     pub(crate) const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";

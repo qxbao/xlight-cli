@@ -152,6 +152,10 @@ XLIGHTCLI_EXPERIMENTAL_CLAUDE_SUBSCRIPTION=1 xlightcli auth login claude --metho
 XLIGHTCLI_EXPERIMENTAL_CLAUDE_SUBSCRIPTION=1 xlightcli dev probe claude --transport claude-subscription "hello"
 ```
 
+`antigravity` additionally needs the Antigravity desktop OAuth client, which is not shipped in this
+repo: set `XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_ID` and `XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_SECRET`
+(see `docs/providers/agy.md`, "OAuth client").
+
 In Phase 0 these flags are environment variables. They move to the global config file in Phase 1.
 
 xlightcli does not implement quota bypass, account pooling or rotation, and it never fakes a

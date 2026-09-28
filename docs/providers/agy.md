@@ -42,9 +42,13 @@ Everything below was read directly from the file contents at that commit (not gu
 - **Response shape**: every SSE data frame is `{"response": {candidates:[...], usageMetadata, promptFeedback}}`
   — the plain Gemini payload **wrapped** in a `response` field. Inline errors:
   `{"error": {code, message, status}}` (no wrapper).
-- **OAuth**: PKCE; `client_id`/`client_secret` are the public "Desktop app" OAuth client identifiers
-  (not a user secret) — `<antigravity-oauth-client-id: not committed>` /
-  `<antigravity-oauth-client-secret: not committed>`. Endpoints: `accounts.google.com/o/oauth2/v2/auth`,
+- **OAuth**: PKCE; the `client_id`/`client_secret` are the public "Desktop app" OAuth client of
+  the Antigravity desktop app (not a user secret). They are **not stored in this repo** (GitHub
+  push protection flags them as a Google OAuth credential, and they belong to Google's client, not
+  to xlightcli). **OAuth client:** users who opt into `antigravity` set
+  `XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_ID` and `XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_SECRET`; the
+  public values are in OpenCodex `src/oauth/google-antigravity.ts` (`CLIENT_ID`, `CLIENT_SECRET`)
+  @ 3cc34e1181926b64331490fdcfee162ffb62fe73. Endpoints: `accounts.google.com/o/oauth2/v2/auth`,
   `oauth2.googleapis.com/token` (+ `/revoke`), `www.googleapis.com/oauth2/v2/userinfo`. Scopes:
   `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`, `experimentsandconfigs`. Fixed
   loopback callback `127.0.0.1:51121/callback` (a port pre-registered with Google, not ephemeral).
@@ -122,3 +126,14 @@ Everything below was read directly from the file contents at that commit (not gu
 - [ ] Confirm whether client_secret is actually required by Google's token endpoint (#2 above).
 - [ ] Check whether gap #4 (single-attempt onboarding) actually causes failures for brand-new
       accounts.
+
+## Live verification log
+
+| Date | Check | Result |
+|---|---|---|
+| 2026-09-28 | `auth login agy --method browser` (antigravity, experimental opt-in) | OK: account stored, Cloud Code Assist project discovered |
+| 2026-09-28 | `dev probe agy --transport antigravity --model gemini-3.8-flash-low` | **403 PERMISSION_DENIED `VALIDATION_REQUIRED`** ("Verify your account to continue."): Google requires browser account verification before serving this client. Possibly triggered by third-party client use (R-2/R-10). xlightcli now surfaces the full `validation_url`; there is no workaround by design. |
+| 2026-09-28 | `dev quota` / `dev models` via xlightcli | OK: Gemini group 91.7% weekly / 100% 5h remaining (matches official agy); catalog lists `gemini-3.8-flash-low` |
+| 2026-09-28 | `dev probe` streaming on **prod** host `cloudcode-pa.googleapis.com` | **429 RESOURCE_EXHAUSTED** without RetryInfo despite available quota, i.e. a policy rejection disguised as a quota error (OpenCodex documents the same pattern) |
+| 2026-09-28 | Diff vs OpenCodex | Body/envelope/User-Agent identical; OpenCodex's antigravity provider streams on `https://daily-cloudcode-pa.googleapis.com` → stream switched to the daily host (pending live re-check) |
+| 2026-09-28 | `dev probe agy --transport antigravity --model gemini-3.8-flash-low` on the **daily** host | **OK**: text streamed, usage incl. 71 reasoning tokens, `stop=EndTurn` |

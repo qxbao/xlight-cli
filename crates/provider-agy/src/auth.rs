@@ -64,6 +64,7 @@ impl AgyAuthAdapter {
     }
 
     async fn login_browser_oauth(&self, ui: &dyn LoginUi) -> Result<CredentialSet, AuthError> {
+        let client = OAuthClient::from_env()?;
         let pkce = oauth::generate_pkce();
         let state = uuid::Uuid::new_v4().to_string();
         let server = oauth::LoopbackServer::bind(
@@ -76,7 +77,7 @@ impl AgyAuthAdapter {
         let scope = antigravity::SCOPES.join(" ");
         let auth_url = oauth::build_authorization_url(oauth::AuthorizationUrlParams {
             authorize_endpoint: antigravity::GOOGLE_AUTH_ENDPOINT,
-            client_id: antigravity::OAUTH_CLIENT_ID,
+            client_id: &client.id,
             redirect_uri: &redirect_uri,
             scope: &scope,
             state: &state,
@@ -88,12 +89,11 @@ impl AgyAuthAdapter {
         let callback = server
             .wait_for_callback(&state, std::time::Duration::from_secs(300))
             .await?;
-        let client_secret = SecretString::from(antigravity::OAUTH_CLIENT_SECRET.to_string());
         let token = oauth::exchange_code_for_token_with_secret(
             &self.http,
             antigravity::GOOGLE_TOKEN_ENDPOINT,
-            antigravity::OAUTH_CLIENT_ID,
-            Some(&client_secret),
+            &client.id,
+            Some(&client.secret),
             &redirect_uri,
             &callback.code,
             &pkce.verifier,
@@ -221,6 +221,39 @@ impl AgyAuthAdapter {
     }
 }
 
+/// The Antigravity OAuth client, read from the environment at login/refresh time
+/// (`consts::antigravity::OAUTH_CLIENT_ID_ENV` / `OAUTH_CLIENT_SECRET_ENV`). Missing values fail
+/// with a clear error instead of a confusing upstream `invalid_client` (INV-10).
+struct OAuthClient {
+    id: String,
+    secret: SecretString,
+}
+
+impl OAuthClient {
+    fn from_env() -> Result<Self, AuthError> {
+        Self::from_values(
+            std::env::var(antigravity::OAUTH_CLIENT_ID_ENV).ok(),
+            std::env::var(antigravity::OAUTH_CLIENT_SECRET_ENV).ok(),
+        )
+    }
+
+    fn from_values(id: Option<String>, secret: Option<String>) -> Result<Self, AuthError> {
+        let non_empty = |v: Option<String>| v.filter(|v| !v.trim().is_empty());
+        match (non_empty(id), non_empty(secret)) {
+            (Some(id), Some(secret)) => Ok(Self {
+                id: id.trim().to_owned(),
+                secret: SecretString::from(secret.trim().to_owned()),
+            }),
+            _ => Err(AuthError::OAuth(format!(
+                "the antigravity transport needs the Antigravity desktop OAuth client: set {} and \
+                 {} (see docs/providers/agy.md, \"OAuth client\")",
+                antigravity::OAUTH_CLIENT_ID_ENV,
+                antigravity::OAUTH_CLIENT_SECRET_ENV
+            ))),
+        }
+    }
+}
+
 /// Builds `AccountInfo.metadata` carrying the discovered project id, if any, under
 /// `consts::antigravity::PROJECT_ID_METADATA_KEY`.
 fn project_id_metadata(project_id: Option<String>) -> Value {
@@ -288,12 +321,12 @@ impl AuthAdapter for AgyAuthAdapter {
         else {
             return Err(AuthError::RefreshRejected);
         };
-        let client_secret = SecretString::from(antigravity::OAUTH_CLIENT_SECRET.to_string());
+        let client = OAuthClient::from_env()?;
         let token = oauth::refresh_access_token_with_secret(
             &self.http,
             antigravity::GOOGLE_TOKEN_ENDPOINT,
-            antigravity::OAUTH_CLIENT_ID,
-            Some(&client_secret),
+            &client.id,
+            Some(&client.secret),
             refresh_token,
         )
         .await?;
@@ -432,5 +465,37 @@ mod tests {
             adapter.methods(),
             &[AuthMethod::ApiKey, AuthMethod::BrowserOAuth]
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_client_tests {
+    use secrecy::ExposeSecret;
+
+    use super::OAuthClient;
+
+    #[test]
+    fn missing_or_blank_values_fail_with_the_env_var_names() {
+        for (id, secret) in [
+            (None, None),
+            (Some("id".to_string()), None),
+            (Some("  ".to_string()), Some("s".to_string())),
+        ] {
+            let err = OAuthClient::from_values(id, secret)
+                .err()
+                .map(|e| e.to_string());
+            let err = err.unwrap_or_default();
+            assert!(
+                err.contains("XLIGHTCLI_ANTIGRAVITY_OAUTH_CLIENT_ID"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn values_are_trimmed() {
+        let c = OAuthClient::from_values(Some(" id \n".into()), Some(" s ".into())).unwrap();
+        assert_eq!(c.id, "id");
+        assert_eq!(c.secret.expose_secret(), "s");
     }
 }

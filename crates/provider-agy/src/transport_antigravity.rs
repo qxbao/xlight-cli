@@ -12,7 +12,7 @@
 //! **This transport deliberately impersonates the official Antigravity IDE client**: its HTTP
 //! `User-Agent` (`crate::consts::antigravity::request_user_agent`) reproduces the real IDE's
 //! decompiled fingerprint, and its OAuth client id/secret are the ones embedded in that same
-//! client (`crate::consts::antigravity::OAUTH_CLIENT_ID`) — the Cloud Code Assist backend answers
+//! client (`crate::consts::antigravity::OAUTH_CLIENT_ID_ENV`) — the Cloud Code Assist backend answers
 //! `404` to CLI-shaped User-Agents for newer models, so there is no honest way to reach them
 //! without matching the fingerprint the OAuth token was minted under. That is exactly the risk
 //! docs/PLAN.md §15 (R-10) and D-002 exist for: this is why the transport is experimental, off by

@@ -32,6 +32,7 @@ fn account() -> AccountInfo {
 
 fn provider_with(cca_base_url: String, experimental_opt_in: bool) -> AgyProvider {
     let endpoints = AgyEndpoints {
+        cca_daily_base_url: cca_base_url.clone(),
         cca_base_url,
         // Set directly rather than via `GOOGLE_ANTIGRAVITY_PROJECT_ID`: mutating the process env
         // from a test would need `std::env::set_var`, which requires `unsafe` since Rust 2024 —

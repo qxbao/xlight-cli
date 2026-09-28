@@ -36,9 +36,18 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// Maps a non-2xx HTTP response to the appropriate `ProviderError` variant. Called exactly once
 /// per response, at the transport boundary.
 pub fn map_status(status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
-    let excerpt = body_excerpt(body);
+    // Redact before anything else: the excerpt ends up in errors and logs (INV-4).
+    let excerpt = body_excerpt(&xlightcli_auth::redact::redact(body));
+    tracing::debug!(status, body = %excerpt, "upstream error response");
     match status {
-        401 | 403 => ProviderError::Auth(AuthFailure::Rejected),
+        // 401 = the credential itself was rejected (refresh + retry makes sense). 403 = the
+        // credential is valid but not allowed (project, plan, client policy): keep the redacted
+        // body so the user can see why instead of a generic "credential rejected".
+        401 => ProviderError::Auth(AuthFailure::Rejected),
+        403 => ProviderError::Upstream {
+            status,
+            body_excerpt: excerpt,
+        },
         429 => ProviderError::RateLimited {
             retry_after: retry_after(headers),
             info: RateLimitInfo {
@@ -72,13 +81,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_401_and_403_to_auth_rejected() {
+    fn maps_401_to_auth_rejected_and_403_to_upstream_with_body() {
         let headers = HeaderMap::new();
-        for status in [401, 403] {
-            assert!(matches!(
-                map_status(status, &headers, ""),
-                ProviderError::Auth(AuthFailure::Rejected)
-            ));
+        assert!(matches!(
+            map_status(401, &headers, ""),
+            ProviderError::Auth(AuthFailure::Rejected)
+        ));
+        match map_status(
+            403,
+            &headers,
+            r#"{"error":{"message":"project not allowed"}}"#,
+        ) {
+            ProviderError::Upstream {
+                status: 403,
+                body_excerpt,
+            } => assert!(body_excerpt.contains("project not allowed")),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

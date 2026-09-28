@@ -26,6 +26,7 @@ antigravity-subscription = ["xlightcli-provider-agy/antigravity-subscription"]
 experimental = ["claude-subscription", "antigravity-subscription"]
 
 [dependencies]
+serde_json = { workspace = true }
 xlightcli-protocol = { workspace = true }
 xlightcli-config = { workspace = true }
 xlightcli-storage = { workspace = true }

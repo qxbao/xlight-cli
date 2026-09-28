@@ -27,6 +27,95 @@ pub async fn probe(
     prompt: &str,
     cancel: CancellationToken,
 ) -> Result<(), CliError> {
+    let (transport, cred) = resolve(ctx, provider_arg, transport_arg).await?;
+    let model_id = match model_arg {
+        Some(m) => ModelId::new(m),
+        None => first_model_id(transport, &cred).await?,
+    };
+
+    stream_and_render(transport, model_id, cred, prompt, cancel).await
+}
+
+/// `dev models`: the model catalog as the transport reports it for this account.
+pub async fn models(
+    ctx: &AppContext,
+    provider_arg: &str,
+    transport_arg: Option<&str>,
+) -> Result<(), CliError> {
+    let (transport, cred) = resolve(ctx, provider_arg, transport_arg).await?;
+    let models = transport
+        .list_models(&cred)
+        .await
+        .map_err(|err| CliError::other(format!("failed to list models: {err}")))?;
+    if models.is_empty() {
+        crate::output::info("(the transport returned no models)");
+    }
+    for m in models {
+        let ctx_window = m
+            .context_window
+            .map(|w| format!("  ctx={w}"))
+            .unwrap_or_default();
+        let reasoning = if m.supports_reasoning {
+            "  reasoning"
+        } else {
+            ""
+        };
+        crate::output::info(&format!(
+            "{:<40} {}{ctx_window}{reasoning}",
+            m.id, m.display_name
+        ));
+    }
+    Ok(())
+}
+
+/// `dev quota`: plan/quota snapshot (`TransportAdapter::quota`, D-027).
+pub async fn quota(
+    ctx: &AppContext,
+    provider_arg: &str,
+    transport_arg: Option<&str>,
+) -> Result<(), CliError> {
+    let (transport, cred) = resolve(ctx, provider_arg, transport_arg).await?;
+    let snapshot = transport
+        .quota(&cred)
+        .await
+        .map_err(|err| CliError::other(format!("failed to fetch quota: {err}")))?;
+    let Some(q) = snapshot else {
+        crate::output::info(&format!(
+            "{} does not expose quota information",
+            transport.id()
+        ));
+        return Ok(());
+    };
+    crate::output::info(&format!(
+        "plan:         {}",
+        q.plan.as_deref().unwrap_or("-")
+    ));
+    crate::output::info(&format!(
+        "used:         {}",
+        q.used_percent
+            .map_or("-".to_string(), |p| format!("{p:.1}%"))
+    ));
+    crate::output::info(&format!(
+        "resets at:    {}",
+        q.resets_at.map_or("-".to_string(), |t| t.to_string())
+    ));
+    if !q.detail.is_null() {
+        let detail = serde_json::to_string_pretty(&q.detail).unwrap_or_default();
+        crate::output::info(&format!(
+            "detail:\n{}",
+            xlightcli_auth::redact::redact(&detail)
+        ));
+    }
+    Ok(())
+}
+
+/// Shared lookup for `dev` commands: provider → transport (default: first stable) → stored
+/// credential.
+async fn resolve<'a>(
+    ctx: &'a AppContext,
+    provider_arg: &str,
+    transport_arg: Option<&str>,
+) -> Result<(&'a Arc<dyn TransportAdapter>, CredentialHandle), CliError> {
     let provider_id = ProviderId::new(provider_arg);
     let provider = ctx.providers.get(&provider_id).ok_or_else(|| {
         CliError::invalid_input(format!(
@@ -56,13 +145,7 @@ pub async fn probe(
         .credential(&provider_id, &transport_id)
         .await
         .map_err(|err| credential_error_to_cli(&provider_id, &transport_id, err))?;
-
-    let model_id = match model_arg {
-        Some(m) => ModelId::new(m),
-        None => first_model_id(transport, &cred).await?,
-    };
-
-    stream_and_render(transport, model_id, cred, prompt, cancel).await
+    Ok((transport, cred))
 }
 
 fn joined_provider_ids(ctx: &AppContext) -> String {

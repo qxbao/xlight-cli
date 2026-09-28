@@ -22,7 +22,9 @@ pub use capability::{
 };
 pub use error::{AuthFailure, ProviderError};
 pub use event::{AgentEvent, QuotaSnapshot, RateLimitInfo, StopReason, Usage};
-pub use ids::{AgentId, CommandId, ModelId, ProviderId, SessionId, ToolCallId, TransportId};
+pub use ids::{
+    AgentId, CommandId, ModelId, ProviderId, SessionId, ToolCallId, TransportId, WorkspaceId,
+};
 pub use import::ConfigFragment;
 pub use message::{ContentBlock, ImageSource, Message, OpaqueBlob, Role, ToolResultPart};
 pub use tool::ToolDefinition;

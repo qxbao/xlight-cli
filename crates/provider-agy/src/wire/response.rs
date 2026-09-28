@@ -407,7 +407,11 @@ fn map_inline_error(err: &Value) -> ProviderError {
         .unwrap_or("upstream error");
     let excerpt = xlightcli_provider::body_excerpt(message);
     match code {
-        401 | 403 => ProviderError::Auth(AuthFailure::Rejected),
+        401 => ProviderError::Auth(AuthFailure::Rejected),
+        403 => ProviderError::Upstream {
+            status: 403,
+            body_excerpt: excerpt,
+        },
         429 => ProviderError::RateLimited {
             retry_after: None,
             info: RateLimitInfo::default(),

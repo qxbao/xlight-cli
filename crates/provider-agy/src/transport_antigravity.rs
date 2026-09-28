@@ -92,7 +92,6 @@ fn resolve_project_id(
 #[derive(Debug)]
 pub(crate) struct AntigravityTransport {
     http: reqwest::Client,
-    cca_base_url: String,
     cca_daily_base_url: String,
     project_id: Option<String>,
     capabilities: ProviderCapabilities,
@@ -103,14 +102,12 @@ pub(crate) struct AntigravityTransport {
 impl AntigravityTransport {
     pub(crate) fn new(
         http: reqwest::Client,
-        cca_base_url: String,
         cca_daily_base_url: String,
         project_id: Option<String>,
         experimental_opt_in: bool,
     ) -> Self {
         Self {
             http,
-            cca_base_url,
             cca_daily_base_url,
             project_id,
             capabilities: capabilities(),
@@ -161,7 +158,7 @@ impl TransportAdapter for AntigravityTransport {
             let status = response.status().as_u16();
             let resp_headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(xlightcli_provider::map_status(status, &resp_headers, &text));
+            return Err(crate::wire::map_google_status(status, &resp_headers, &text));
         }
         let json: Value = response
             .json()
@@ -232,9 +229,13 @@ impl TransportAdapter for AntigravityTransport {
             &session_id,
             flat_body,
         );
+        // Stream on the daily host like the rest of the agent-path calls: OpenCodex's shipped
+        // antigravity provider uses `https://daily-cloudcode-pa.googleapis.com` as its baseUrl
+        // (src/oauth/index.ts v1 seed fingerprint). Live 2026-09-28: the prod host answered 429
+        // RESOURCE_EXHAUSTED while quota for the same account showed 91% remaining.
         let url = format!(
             "{}/{}:streamGenerateContent?alt=sse",
-            self.cca_base_url,
+            self.cca_daily_base_url,
             antigravity::CCA_API_VERSION
         );
         let model: ModelId = req.model.clone();
@@ -312,7 +313,6 @@ mod tests {
         AntigravityTransport::new(
             reqwest::Client::new(),
             "https://example.invalid".into(),
-            "https://example.invalid".into(),
             Some("test-project".into()),
             experimental_opt_in,
         )
@@ -341,7 +341,6 @@ mod tests {
     async fn quota_without_a_configured_project_id_is_invalid_request() {
         let t = AntigravityTransport::new(
             reqwest::Client::new(),
-            "https://example.invalid".into(),
             "https://example.invalid".into(),
             None,
             true,

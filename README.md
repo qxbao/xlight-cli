@@ -185,6 +185,8 @@ xlightcli [-v] <command>
   provider list                                    providers and their transports
   provider info <provider>                         capabilities, transports, commands
   dev probe <provider> [--transport T] [--model M] <prompt>
+  dev models <provider> [--transport T]          models available to the logged-in account
+  dev quota  <provider> [--transport T]          plan/quota snapshot, when the provider exposes it
 ```
 
 `-v` also prints debug logs to stderr. Logs always go, redacted, to

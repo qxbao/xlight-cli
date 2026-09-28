@@ -26,4 +26,9 @@ pub enum StorageError {
         transport: String,
         account_id: String,
     },
+
+    /// The writer-thread channel is closed or the writer panicked mid-command (PATTERNS.md §10):
+    /// every `Storage` method surfaces this instead of hanging forever.
+    #[error("storage writer thread is not running")]
+    WriterUnavailable,
 }

@@ -18,7 +18,10 @@ pub enum ProviderError {
     #[error("authentication failed: {0}")]
     Auth(#[from] AuthFailure),
 
-    #[error("rate limited")]
+    #[error(
+        "rate limited{}",
+        retry_after.map(|d| format!(" (retry after {}s)", d.as_secs())).unwrap_or_default()
+    )]
     RateLimited {
         retry_after: Option<Duration>,
         info: RateLimitInfo,

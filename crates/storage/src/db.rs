@@ -15,7 +15,10 @@ use crate::error::StorageError;
 
 /// Ordered, append-only list of migrations. Add new entries at the end; never edit or remove a
 /// migration that has already shipped (CODEBASE.md §7).
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("migrations/0001_accounts.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("migrations/0001_accounts.sql")),
+    (2, include_str!("migrations/0002_sessions.sql")),
+];
 
 /// Opens (creating if needed) the sqlite database at `path`, enables WAL, and applies any
 /// migration that hasn't run yet.
@@ -31,7 +34,18 @@ pub(crate) fn open_and_migrate(path: &Path) -> Result<Connection, StorageError> 
     // WAL lets readers and the (future, Phase 1) writer thread proceed concurrently
     // (docs/PLAN.md §11.2, PATTERNS.md §10).
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     run_migrations(&conn)?;
+    Ok(conn)
+}
+
+/// Opens a second connection to an already-migrated file database, for the read-side of
+/// `Storage` (PATTERNS.md §10 "the reader uses its own read-only connection"). Does **not**
+/// re-run migrations (the writer connection already did) but still enables `foreign_keys` for
+/// consistency.
+pub(crate) fn open_reader(path: &Path) -> Result<Connection, StorageError> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }
 
@@ -40,6 +54,7 @@ pub(crate) fn open_and_migrate(path: &Path) -> Result<Connection, StorageError> 
 #[cfg(test)]
 pub(crate) fn open_in_memory_and_migrate() -> Result<Connection, StorageError> {
     let conn = Connection::open_in_memory()?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     run_migrations(&conn)?;
     Ok(conn)
 }

@@ -47,6 +47,20 @@ async fn execute(cli: &Cli, ctx: &AppContext) -> Result<(), CliError> {
     match &cli.command {
         Some(Command::Dev {
             command:
+                DevCommand::Models {
+                    provider,
+                    transport,
+                },
+        }) => cmd::dev::models(ctx, provider, transport.as_deref()).await,
+        Some(Command::Dev {
+            command:
+                DevCommand::Quota {
+                    provider,
+                    transport,
+                },
+        }) => cmd::dev::quota(ctx, provider, transport.as_deref()).await,
+        Some(Command::Dev {
+            command:
                 DevCommand::Probe {
                     provider,
                     transport,

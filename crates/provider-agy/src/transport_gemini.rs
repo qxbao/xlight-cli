@@ -127,7 +127,7 @@ impl TransportAdapter for GeminiApiTransport {
             let status = response.status().as_u16();
             let resp_headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(xlightcli_provider::map_status(status, &resp_headers, &text));
+            return Err(crate::wire::map_google_status(status, &resp_headers, &text));
         }
         let body: Value = response
             .json()

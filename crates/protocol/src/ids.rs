@@ -112,6 +112,12 @@ uuid_id!(
     /// Identifier of one agent = one async task (INV-5).
     AgentId
 );
+uuid_id!(
+    /// Persisted workspace identifier (`storage::workspaces`, docs/PLAN.md §10.1, §11.2). A
+    /// workspace is a repo root (shared checkout or worktree, docs/PLAN.md §11.3), not a session:
+    /// several sessions can share one workspace.
+    WorkspaceId
+);
 
 /// Namespaced command identifier, e.g. `"core.mcp"` or `"claude.insights"` (PATTERNS.md §12).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

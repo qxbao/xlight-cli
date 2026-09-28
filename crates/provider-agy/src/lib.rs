@@ -113,7 +113,6 @@ fn build_transports(
     {
         transports.push(Arc::new(transport_antigravity::AntigravityTransport::new(
             http.clone(),
-            endpoints.cca_base_url.clone(),
             endpoints.cca_daily_base_url.clone(),
             endpoints.antigravity_project_id.clone(),
             experimental_antigravity_subscription,

@@ -56,6 +56,18 @@ pub enum DevCommand {
         /// Prompt text, sent as the single user turn (`TurnRequest::simple`).
         prompt: String,
     },
+    /// Lists the models a provider/transport offers to the logged-in account.
+    Models {
+        provider: String,
+        #[arg(long)]
+        transport: Option<String>,
+    },
+    /// Shows plan/quota information from the provider, when the transport exposes it.
+    Quota {
+        provider: String,
+        #[arg(long)]
+        transport: Option<String>,
+    },
 }
 
 /// CLI-facing login method selector; mapped to `xlightcli_auth::AuthMethod` in `cmd::auth`

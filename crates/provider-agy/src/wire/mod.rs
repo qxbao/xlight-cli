@@ -89,7 +89,7 @@ pub(crate) async fn run_stream(
         let status = response.status().as_u16();
         let resp_headers = response.headers().clone();
         let text = response.text().await.unwrap_or_default();
-        return Err(xlightcli_provider::map_status(status, &resp_headers, &text));
+        return Err(map_google_status(status, &resp_headers, &text));
     }
     let byte_stream = Box::pin(
         response
@@ -137,4 +137,117 @@ pub(crate) async fn run_stream(
             Err(e) => yield Err(e),
         }
     }))
+}
+
+/// Maps a non-2xx Google response. Recognizes `google.rpc.ErrorInfo` reason
+/// `VALIDATION_REQUIRED` (the account must be verified in a browser) and surfaces the full
+/// verification link instead of a truncated body excerpt; everything else goes through
+/// `provider::map_status`.
+pub(crate) fn map_google_status(
+    status: u16,
+    headers: &http::HeaderMap,
+    body: &str,
+) -> xlightcli_protocol::ProviderError {
+    if status == 429 {
+        let excerpt = xlightcli_provider::body_excerpt(&xlightcli_auth::redact::redact(body));
+        tracing::debug!(status, body = %excerpt, "google rate limit response");
+        if let xlightcli_protocol::ProviderError::RateLimited { retry_after, info } =
+            xlightcli_provider::map_status(status, headers, body)
+        {
+            return xlightcli_protocol::ProviderError::RateLimited {
+                retry_after: retry_after.or_else(|| google_retry_delay(body)),
+                info,
+            };
+        }
+    }
+    if let Some(msg) = validation_required_message(body) {
+        return xlightcli_protocol::ProviderError::Upstream {
+            status,
+            body_excerpt: msg,
+        };
+    }
+    xlightcli_provider::map_status(status, headers, body)
+}
+
+/// Reads `google.rpc.RetryInfo.retryDelay` (e.g. `"37s"` or `"1.5s"`) from an error body.
+fn google_retry_delay(body: &str) -> Option<std::time::Duration> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    json.get("error")?
+        .get("details")?
+        .as_array()?
+        .iter()
+        .find_map(|d| d.get("retryDelay").and_then(serde_json::Value::as_str))
+        .and_then(|s| s.strip_suffix('s'))
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)
+        .map(std::time::Duration::from_secs_f64)
+}
+
+fn validation_required_message(body: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = json.get("error")?;
+    let info = error.get("details")?.as_array()?.iter().find(|d| {
+        d.get("reason").and_then(serde_json::Value::as_str) == Some("VALIDATION_REQUIRED")
+    })?;
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Google requires account verification");
+    let url = info
+        .get("metadata")
+        .and_then(|m| m.get("validation_url"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|u| u.starts_with("https://"));
+    Some(match url {
+        Some(url) => format!(
+            "{message} Google requires you to verify this account before it can be used here. \
+             Open this link in a browser signed in as the same Google account, then retry:\n  {url}"
+        ),
+        None => format!("{message} (Google reason: VALIDATION_REQUIRED)"),
+    })
+}
+
+#[cfg(test)]
+mod google_status_tests {
+    use super::map_google_status;
+    use xlightcli_protocol::ProviderError;
+
+    #[test]
+    fn validation_required_surfaces_full_link() {
+        let body = r#"{"error":{"code":403,"message":"Verify your account to continue.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VALIDATION_REQUIRED","domain":"cloudcode-pa.googleapis.com","metadata":{"validation_url":"https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX&end=1"}}]}}"#;
+        match map_google_status(403, &http::HeaderMap::new(), body) {
+            ProviderError::Upstream {
+                status: 403,
+                body_excerpt,
+            } => {
+                assert!(
+                    body_excerpt.contains("&end=1"),
+                    "link must not be truncated"
+                );
+                assert!(body_excerpt.contains("Verify your account"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_reads_google_retry_delay() {
+        let body = r#"{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"37s"}]}}"#;
+        match map_google_status(429, &http::HeaderMap::new(), body) {
+            ProviderError::RateLimited { retry_after, .. } => {
+                assert_eq!(retry_after, Some(std::time::Duration::from_secs(37)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_403_falls_back_to_generic_mapping() {
+        let body =
+            r#"{"error":{"code":403,"message":"nope","details":[{"reason":"SOMETHING_ELSE"}]}}"#;
+        assert!(matches!(
+            map_google_status(403, &http::HeaderMap::new(), body),
+            ProviderError::Upstream { status: 403, .. }
+        ));
+    }
 }

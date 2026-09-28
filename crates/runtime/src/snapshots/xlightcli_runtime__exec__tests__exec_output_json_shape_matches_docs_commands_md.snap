@@ -1,0 +1,16 @@
+---
+source: crates/runtime/src/exec.rs
+expression: output
+---
+{
+  "conversation_id": "00000000-0000-0000-0000-000000000000",
+  "status": "ok",
+  "response": "Hello, world!",
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "thinking_tokens": 5,
+    "cache_read_tokens": 10,
+    "total_tokens": 125
+  }
+}

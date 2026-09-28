@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: "status_line_snapshot(ExecutionMode::Default).await"
+---
+- · -/- · - · 0 agents (0 running) · ctx 0% · default · ask

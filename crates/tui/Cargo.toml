@@ -25,3 +25,4 @@ xlightcli-runtime = { workspace = true, features = ["testing"] }
 xlightcli-storage = { workspace = true }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
+insta = { workspace = true }

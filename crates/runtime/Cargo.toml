@@ -29,8 +29,17 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
+# Matches `.agents/rules/*.md`-style globs when `ContextManager` discovers project rule files
+# (docs/PLAN.md §9.2); already a workspace dependency (used by `xlightcli-tools`'s
+# `PermissionEngine`), so this doesn't add a new external dependency to the workspace.
+globset = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
-time = { workspace = true }
+insta = { workspace = true }
+uuid = { workspace = true }
+async-stream = { workspace = true }
+secrecy = { workspace = true }

@@ -19,10 +19,14 @@ pub mod context;
 pub mod error;
 pub mod exec;
 pub mod handle;
+mod permission_gate;
 pub mod session;
 
 #[cfg(feature = "testing")]
 pub mod testing;
+
+#[cfg(test)]
+mod test_support;
 
 pub use agent::AgentLoop;
 pub use commands::CommandRegistry;

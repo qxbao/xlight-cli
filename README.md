@@ -8,21 +8,22 @@ Talks to each provider directly — never wraps or spawns <code>codex</code>, <c
   <img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="license GPL-3.0-only">
   <img src="https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust" alt="rust 1.90+">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-24292f" alt="Linux | macOS">
-  <img src="https://img.shields.io/badge/status-Phase%200%20(pre--alpha)-lightgrey" alt="status: Phase 0">
+  <img src="https://img.shields.io/badge/status-Phase%201%20(in%20progress)-lightgrey" alt="status: Phase 1">
 </p>
 
 ```bash
 cargo install --locked --path crates/app      # from a clone of this repository
 xlightcli auth login codex                    # ChatGPT sign-in in your browser
-xlightcli dev probe codex "Reply exactly with hello"
+xlightcli                                     # interactive TUI
+xlightcli exec -p "Reply exactly with hello"  # headless, scriptable
 ```
 
 > [!IMPORTANT]
-> **xlightcli is in Phase 0** (protocol/auth spike). What works today: provider login, credential
-> storage, and streaming a single prompt with `xlightcli dev probe`. The interactive TUI, tools,
-> MCP and multi-agent runtime arrive in later phases — see the [roadmap](#roadmap).
-> Provider endpoints are implemented from source research and are still being **verified against
-> live accounts** ([`docs/providers/`](docs/providers)).
+> **xlightcli is in Phase 1** (single-agent terminal). Provider login/credential storage/streaming
+> (Phase 0) work end to end; the interactive TUI, `exec` headless mode, built-in tools and
+> permissions are now real too, but `init`'s provider/auth wizard, MCP and the multi-agent runtime
+> are still ahead — see the [roadmap](#roadmap). Provider endpoints are implemented from source
+> research and are still being **verified against live accounts** ([`docs/providers/`](docs/providers)).
 
 ## Why
 
@@ -105,6 +106,43 @@ xlightcli dev probe agy "hello"
 rate-limit information the provider returned. Exit codes: `0` ok · `1` error · `2` invalid input
 (unknown provider, not logged in…) · `3` error after partial output.
 
+### 4. Interactive TUI, or headless `exec`
+
+```bash
+xlightcli                                                  # interactive TUI (bare invocation)
+xlightcli exec -p "Explain Rust lifetimes in one paragraph" --provider codex
+xlightcli exec -p "..." --output-format json               # {conversation_id, status, response, usage}
+xlightcli exec -p "..." --output-format stream-json         # one JSON line per event, then the final line
+xlightcli init                                              # writes .xlightcli/config.toml (+ AGENTS.md stub)
+```
+
+`exec` is compatible with agy's/Claude Code's print-mode flags (`-p`/`--print`, `-c`/`--continue`,
+`--resume <id>`, `--model`, `--mode`, `--add-dir`, `--print-timeout`,
+`--dangerously-skip-permissions`) — see [`docs/commands.md`](docs/commands.md) §5. Exit codes: `0`
+ok · `1` error · `2` invalid input (bad flag, unknown provider/transport, no `--provider` and no
+`default_provider` configured) · `3` the turn ended abnormally (cancelled, hit `max_tokens`, …) after
+some output was already produced.
+
+`init` writes a project-level `.xlightcli/config.toml` skeleton and, if missing, an `AGENTS.md`
+stub — it never overwrites an existing file without asking first. The full interactive
+provider/auth/import wizard (docs/PLAN.md §18.1) isn't built yet; run `xlightcli auth login
+<provider>` to authenticate in the meantime.
+
+#### TUI key bindings
+
+| Key | Action |
+|---|---|
+| `Enter` | Submit the prompt (or run a `/command` if it starts with `/`) |
+| `Alt+Enter` | Insert a newline in a multiline prompt |
+| `Up` / `Down` | Previous/next prompt from history (when not navigating an overlay) |
+| `Shift+Tab` | Cycle execution mode: `default → accept-edits → plan` |
+| `Esc` | Cancel the running turn (or close an open overlay/dialog) |
+| `Ctrl+C` (×2) | Quit — the first press shows a "press again to exit" notice |
+| `/` (empty prompt) or `Ctrl+P` | Open the command palette |
+| `Ctrl+R` | Collapse/expand the most recent reasoning block |
+| `Page Up` / `Page Down` | Scroll the transcript |
+| `a` / `A` / `d` (permission dialog) | Allow once / always allow this rule / deny |
+
 ## Supported platforms
 
 | OS | Status | Credential store |
@@ -180,8 +218,13 @@ provider feature it can't reach.
 ## CLI
 
 ```text
+xlightcli [-v]                                   interactive TUI
 xlightcli [-v] <command>
 
+  init                                              write .xlightcli/config.toml (+ AGENTS.md stub)
+  exec (-p|--print) <prompt> [--output-format text|json|stream-json] [--provider P] [--transport T]
+       [--model M] [--mode default|accept-edits|plan] [-c|--continue] [--resume ID]
+       [--dangerously-skip-permissions] [--add-dir DIR]... [--print-timeout SECS]
   auth list                                        stored accounts + importable credentials
   auth login  <provider> [--transport T] [--method browser|device|api-key]   (method defaults per transport)
   auth logout <provider> [--transport T] [--account ID]
@@ -208,11 +251,11 @@ xlightcli [-v] <command>
 ### Files
 
 ```text
-~/.config/xlightcli/config.toml        global config (Phase 1)
-~/.local/share/xlightcli/xlightcli.db  account metadata (SQLite, WAL)
+~/.config/xlightcli/config.toml        global config
+~/.local/share/xlightcli/xlightcli.db  account metadata + sessions/events (SQLite, WAL)
 ~/.local/share/xlightcli/credentials/  file credential store (only with XLIGHTCLI_AUTH_STORE=file)
 ~/.local/state/xlightcli/logs/         redacted logs
-<repo>/.xlightcli/                     project config (Phase 1)
+<repo>/.xlightcli/config.toml          project config (written by `xlightcli init`)
 ```
 
 ### Uninstall
@@ -227,8 +270,8 @@ rm -rf ~/.config/xlightcli ~/.local/share/xlightcli ~/.local/state/xlightcli
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Protocol/auth spike: login → refresh → stream for all three providers, without the provider CLIs | **in progress**: implemented, live verification pending |
-| 1 | Single-agent TUI: sessions, tools, permissions, SQLite persistence, `exec` headless mode | planned |
+| 0 | Protocol/auth spike: login → refresh → stream for all three providers, without the provider CLIs | **accepted** (D-030): implemented, live-verified end to end |
+| 1 | Single-agent TUI: sessions, tools, permissions, SQLite persistence, `exec` headless mode | **in progress**: TUI rendering/interactions, `exec`, built-in tools, permissions, config loading, and `init`'s minimal (non-wizard) form are implemented; the full `init` provider/auth wizard, checkpoints and benchmarking are not |
 | 2 | Capability system: command registry, feature packs, `/insights`, core recipes (`/plan`, `/goal`, `/btw`…) | planned |
 | 3 | Shared MCP manager and config import from other CLIs | planned |
 | 4 | Multi-agent runtime: spawn/wait/cancel, scheduler, budgets | planned |

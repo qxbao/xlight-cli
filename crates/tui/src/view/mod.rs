@@ -11,8 +11,8 @@ pub mod status_line;
 pub mod transcript;
 
 pub use command_palette::CommandPaletteView;
-pub use diff_view::DiffView;
-pub use permission_dialog::PermissionDialogView;
+pub use diff_view::{DiffHunk, DiffView, parse_unified_diff};
+pub use permission_dialog::{PermissionChoice, PermissionDialogView, centered_rect};
 pub use prompt::PromptView;
 pub use status_line::StatusLineView;
-pub use transcript::TranscriptView;
+pub use transcript::{TranscriptLine, TranscriptRole, TranscriptView};

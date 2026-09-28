@@ -13,12 +13,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 use xlightcli_protocol::{
     AgentId, ModelId, ProviderId, SessionId, StopReason, ToolCallId, TransportId, Usage,
 };
 
+use crate::agent::{AgentLoop, TurnContext};
 use crate::commands::CommandRegistry;
+use crate::context::ContextManager;
 use crate::error::RuntimeError;
+use crate::permission_gate::PendingPermissions;
 use crate::session::Session;
 
 /// Process-wide shared resources a `RuntimeHandle` operates over (CODEBASE.md §5), `Arc`'d by
@@ -167,6 +171,18 @@ struct RuntimeState {
     ui_tx: mpsc::Sender<UiEvent>,
     ui_rx: Mutex<Option<mpsc::Receiver<UiEvent>>>,
     sessions: Mutex<HashMap<SessionId, Session>>,
+    /// One root `AgentId` per session, lazily registered (or recovered via
+    /// `Storage::list_agents` on resume, docs/PLAN.md §11.2 "resume after a crash") the first time
+    /// a turn runs for that session.
+    agents: Mutex<HashMap<SessionId, AgentId>>,
+    /// The `CancellationToken` for a session's in-flight turn, if any — `cancel_turn` cancels it;
+    /// `AgentLoop::run_turn` removes the entry once the turn ends (success, failure, or
+    /// cancellation).
+    active_turns: Mutex<HashMap<SessionId, CancellationToken>>,
+    /// Shared with every `crate::permission_gate::RuntimePermissionGate` built for this handle's
+    /// turns; `respond_to_permission` resolves an entry here.
+    pending_permissions: PendingPermissions,
+    context: ContextManager,
 }
 
 /// The only handle `tui`/`app` (and `exec`) hold. Cheap to clone (`Arc`'d internally).
@@ -184,6 +200,7 @@ impl std::fmt::Debug for RuntimeHandle {
 impl RuntimeHandle {
     pub fn new(deps: RuntimeDeps, config: RuntimeConfig) -> Self {
         let (ui_tx, ui_rx) = mpsc::channel(config.ui_channel_capacity);
+        let context = ContextManager::from_full_config(&deps.config);
         Self {
             state: Arc::new(RuntimeState {
                 deps,
@@ -191,6 +208,10 @@ impl RuntimeHandle {
                 ui_tx,
                 ui_rx: Mutex::new(Some(ui_rx)),
                 sessions: Mutex::new(HashMap::new()),
+                agents: Mutex::new(HashMap::new()),
+                active_turns: Mutex::new(HashMap::new()),
+                pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+                context,
             }),
         }
     }
@@ -225,7 +246,10 @@ impl RuntimeHandle {
         let _ = self.state.ui_tx.send(event).await;
     }
 
-    async fn get_session(&self, session_id: SessionId) -> Result<Session, RuntimeError> {
+    /// `pub(crate)` (not just private): `crate::exec::run_exec` needs to fetch the same `Session`
+    /// snapshot `submit_user_input` uses, without duplicating `RuntimeHandle`'s session-tracking
+    /// state in `exec.rs`.
+    pub(crate) async fn get_session(&self, session_id: SessionId) -> Result<Session, RuntimeError> {
         self.state
             .sessions
             .lock()
@@ -233,6 +257,36 @@ impl RuntimeHandle {
             .get(&session_id)
             .cloned()
             .ok_or(RuntimeError::UnknownSession(session_id))
+    }
+
+    /// Returns the session's root `AgentId`, registering one via `Storage::register_agent` the
+    /// first time this is called for a session — or, if the process restarted (crash recovery,
+    /// docs/PLAN.md §11.2), recovering the one a previous run already registered via
+    /// `Storage::list_agents` instead of creating a duplicate.
+    pub(crate) async fn ensure_agent(&self, session: &Session) -> Result<AgentId, RuntimeError> {
+        if let Some(id) = self.state.agents.lock().await.get(&session.id).copied() {
+            return Ok(id);
+        }
+        let existing = self.state.deps.storage.list_agents(session.id).await?;
+        let agent_id = match existing.into_iter().find(|a| a.parent_id.is_none()) {
+            Some(record) => record.id,
+            None => {
+                self.state
+                    .deps
+                    .storage
+                    .register_agent(
+                        session.id,
+                        None,
+                        serde_json::json!({
+                            "provider": session.provider,
+                            "transport": session.transport,
+                        }),
+                    )
+                    .await?
+            }
+        };
+        self.state.agents.lock().await.insert(session.id, agent_id);
+        Ok(agent_id)
     }
 
     /// Creates a new session (persisted via `Storage`) and tracks it in-memory.
@@ -286,54 +340,365 @@ impl RuntimeHandle {
         Ok(())
     }
 
-    /// Submits the user's next turn. Wave B: drives `crate::agent::AgentLoop::run_turn` and
-    /// streams the resulting `UiEvent`s; for now, validates the session exists and reports
-    /// `NotImplemented`.
+    /// Submits the user's next turn: drives `crate::agent::AgentLoop::run_turn` and streams the
+    /// resulting `UiEvent`s to whoever called [`Self::subscribe`].
     pub async fn submit_user_input(
         &self,
         session_id: SessionId,
-        _text: String,
+        text: String,
     ) -> Result<(), RuntimeError> {
         let session = self.get_session(session_id).await?;
-        crate::agent::AgentLoop::run_turn(&self.state.deps, &session).await
+        let agent_id = self.ensure_agent(&session).await?;
+        self.run_turn_for(&session, agent_id, text, None).await?;
+        Ok(())
+    }
+
+    /// Shared by [`Self::submit_user_input`] and `crate::exec::run_exec`: registers a
+    /// per-session `CancellationToken` (so [`Self::cancel_turn`] has something to cancel) for the
+    /// duration of the turn, then delegates to `AgentLoop::run_turn`. `headless_ask_policy`
+    /// distinguishes the two callers: `None` for the interactive path (an `Ask` permission
+    /// decision is routed to the UI); `Some(policy)` for headless `exec`, which has no UI to
+    /// prompt (docs/commands.md §5).
+    pub(crate) async fn run_turn_for(
+        &self,
+        session: &Session,
+        agent_id: AgentId,
+        text: String,
+        headless_ask_policy: Option<xlightcli_tools::AskPolicy>,
+    ) -> Result<crate::agent::TurnSummary, RuntimeError> {
+        let cancel = CancellationToken::new();
+        self.state
+            .active_turns
+            .lock()
+            .await
+            .insert(session.id, cancel.clone());
+
+        let permission_engine =
+            xlightcli_tools::PermissionEngine::from_config(&self.state.deps.config.permissions);
+        let max_steps = self.state.deps.config.budget.default.max_turns.max(1);
+
+        let turn_ctx = TurnContext {
+            deps: &self.state.deps,
+            session,
+            agent_id,
+            context: &self.state.context,
+            permission_engine,
+            ui_tx: self.state.ui_tx.clone(),
+            pending_permissions: Arc::clone(&self.state.pending_permissions),
+            cancel: cancel.clone(),
+            max_steps,
+            headless_ask_policy,
+        };
+        let result = AgentLoop::run_turn(turn_ctx, text).await;
+        self.state.active_turns.lock().await.remove(&session.id);
+        result
     }
 
     /// Runs a slash command (docs/PLAN.md §5, PATTERNS.md §12). Resolution order: core, then the
-    /// active provider's `FeaturePack` (Phase 2) — only core commands exist in Phase 1.
+    /// active provider's `FeaturePack` (Phase 2) — only core commands exist in Phase 1, so a
+    /// resolved command outside the `core.*` namespace still reports `Unavailable` rather than
+    /// panicking on an unreachable match arm.
     pub async fn run_command(
         &self,
         session_id: SessionId,
         raw: &str,
     ) -> Result<CommandOutcome, RuntimeError> {
-        let _session = self.get_session(session_id).await?;
-        let (alias, _rest) = raw
-            .trim_start_matches('/')
-            .split_once(' ')
-            .unwrap_or((raw.trim_start_matches('/'), ""));
-        match self.state.commands.resolve(alias) {
-            Some(def) => Ok(CommandOutcome::Unavailable {
+        let session = self.get_session(session_id).await?;
+        let trimmed = raw.trim_start_matches('/');
+        let (alias, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+        let rest = rest.trim();
+        let def = self
+            .state
+            .commands
+            .resolve(alias)
+            .ok_or_else(|| RuntimeError::UnknownCommand(alias.to_string()))?;
+
+        match def.id.as_str() {
+            "core.help" => Ok(CommandOutcome::Message(self.render_help())),
+            "core.exit" => Ok(CommandOutcome::Message(
+                "Exiting xlightcli. (Confirming whether an agent is still running is the \
+                 frontend's job — it should call `cancel_turn` first if so.)"
+                    .to_string(),
+            )),
+            "core.clear" => self.run_clear(&session).await,
+            "core.resume" => self.run_resume(&session).await,
+            "core.model" => {
+                if rest.is_empty() {
+                    Ok(CommandOutcome::Message(format!(
+                        "Current model: {}",
+                        session.model
+                    )))
+                } else {
+                    Ok(CommandOutcome::Unavailable {
+                        reason: "switching the model of an existing session isn't implemented \
+                                 yet (Wave C) — start a new session instead"
+                            .to_string(),
+                    })
+                }
+            }
+            "core.context" => self.run_context(&session).await,
+            "core.compact" => Ok(CommandOutcome::Unavailable {
+                reason: "persisted compaction summaries aren't implemented yet (`Storage` has \
+                         no `summaries` CRUD API yet) — context is auto-compacted per request \
+                         inside the agent loop when it crosses the threshold, but `/compact` \
+                         can't rewrite history on demand yet (Wave C)"
+                    .to_string(),
+            }),
+            "core.diff" => self.run_diff().await,
+            "core.permissions" => Ok(CommandOutcome::Message(self.render_permissions())),
+            "core.config" => Ok(CommandOutcome::Message(self.render_config())),
+            "core.status" => Ok(CommandOutcome::Message(self.render_status(&session))),
+            "core.login" => Ok(CommandOutcome::Unavailable {
+                reason: "the runtime has no interactive login surface yet; run `xlightcli auth \
+                         login <provider>` instead (INV-10)"
+                    .to_string(),
+            }),
+            "core.logout" => Ok(CommandOutcome::Unavailable {
+                reason: "the runtime has no interactive logout surface yet; run `xlightcli \
+                         auth logout <provider>` instead (INV-10)"
+                    .to_string(),
+            }),
+            "core.mode" => self.run_mode(&session, rest).await,
+            _ => Ok(CommandOutcome::Unavailable {
                 reason: format!("{} not implemented yet (Wave B)", def.id),
             }),
-            None => Err(RuntimeError::UnknownCommand(alias.to_string())),
         }
     }
 
-    /// Answers a pending `UiEvent::PermissionRequested`. Wave B: correlates `tool_call_id` with
-    /// the tool executor's waiting future; for now, always reports no pending request (there is no
-    /// real tool executor yet to have created one).
+    fn render_help(&self) -> String {
+        let mut lines = vec!["Core commands:".to_string()];
+        for def in self.state.commands.core_commands() {
+            lines.push(format!("  /{:<12} {}", def.alias, def.summary));
+        }
+        lines.join("\n")
+    }
+
+    fn render_permissions(&self) -> String {
+        let cfg = &self.state.deps.config.permissions;
+        let mut lines = vec![format!("mode: {:?}", cfg.mode)];
+        for rule in cfg.rules() {
+            lines.push(format!("  {:?} {}", rule.effect, rule.to_raw()));
+        }
+        lines.join("\n")
+    }
+
+    fn render_config(&self) -> String {
+        serde_json::to_string_pretty(&self.state.deps.config)
+            .unwrap_or_else(|_| "<config failed to serialize>".to_string())
+    }
+
+    fn render_status(&self, session: &Session) -> String {
+        format!(
+            "xlightcli {}\nsession: {}\nprovider: {} ({})\nmodel: {}\nexecution mode: {:?}",
+            env!("CARGO_PKG_VERSION"),
+            session.id,
+            session.provider,
+            session.transport,
+            session.model,
+            session.mode
+        )
+    }
+
+    async fn run_clear(&self, session: &Session) -> Result<CommandOutcome, RuntimeError> {
+        let new_id = self
+            .create_session(
+                session.workspace_id,
+                session.provider.clone(),
+                session.transport.clone(),
+                session.model.clone(),
+                None,
+            )
+            .await?;
+        Ok(CommandOutcome::Message(format!(
+            "Started a new session {new_id} — the previous session {} can still be resumed via \
+             /resume.",
+            session.id
+        )))
+    }
+
+    async fn run_resume(&self, session: &Session) -> Result<CommandOutcome, RuntimeError> {
+        let mut sessions = self
+            .state
+            .deps
+            .storage
+            .list_sessions(Some(session.workspace_id))
+            .await?;
+        if sessions.is_empty() {
+            return Ok(CommandOutcome::Message(
+                "No sessions found for this workspace.".to_string(),
+            ));
+        }
+        sessions.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
+        let mut lines = vec!["Sessions in this workspace (most recent first):".to_string()];
+        for record in sessions {
+            lines.push(format!(
+                "  {} [{:?}] {}",
+                record.id,
+                record.status,
+                record.title.as_deref().unwrap_or("(untitled)")
+            ));
+        }
+        Ok(CommandOutcome::Message(lines.join("\n")))
+    }
+
+    async fn run_context(&self, session: &Session) -> Result<CommandOutcome, RuntimeError> {
+        let request = self
+            .state
+            .context
+            .build_turn_request(&self.state.deps.storage, &self.state.deps.tools, session)
+            .await?;
+        let system_tokens = crate::context::estimate_tokens(&request.system.text);
+        let history_tokens: u64 = request
+            .messages
+            .iter()
+            .map(crate::context::estimate_message_tokens)
+            .sum();
+        let tools_tokens: u64 = request
+            .tools
+            .iter()
+            .map(|def| {
+                crate::context::estimate_tokens(&def.description)
+                    + crate::context::estimate_tokens(&def.input_schema.to_string())
+            })
+            .sum();
+        Ok(CommandOutcome::Message(format!(
+            "Context breakdown (chars/4 heuristic, docs/PLAN.md §9.2):\n  \
+             system + rules: ~{system_tokens} tokens\n  \
+             history ({} messages): ~{history_tokens} tokens\n  \
+             tools ({}): ~{tools_tokens} tokens\n  \
+             total: ~{} tokens",
+            request.messages.len(),
+            request.tools.len(),
+            system_tokens + history_tokens + tools_tokens
+        )))
+    }
+
+    async fn run_mode(
+        &self,
+        session: &Session,
+        rest: &str,
+    ) -> Result<CommandOutcome, RuntimeError> {
+        let new_mode = if rest.is_empty() {
+            session.mode.next()
+        } else {
+            match rest {
+                "default" => xlightcli_tools::ExecutionMode::Default,
+                "accept-edits" | "auto-edit" => xlightcli_tools::ExecutionMode::AcceptEdits,
+                "plan" => xlightcli_tools::ExecutionMode::Plan,
+                other => {
+                    return Ok(CommandOutcome::Unavailable {
+                        reason: format!(
+                            "unknown mode {other:?} (expected default|accept-edits|plan)"
+                        ),
+                    });
+                }
+            }
+        };
+        self.set_execution_mode(session.id, new_mode).await?;
+        Ok(CommandOutcome::Message(format!(
+            "Execution mode: {new_mode:?}"
+        )))
+    }
+
+    /// `/diff` (docs/commands.md §2 `core.diff`): shells out to `git diff` via `ProcessLauncher`
+    /// (INV-1) and reports the result through `OutputSpool` (INV-7) rather than buffering the
+    /// whole thing. A `git` failure (not a repo, `git` missing, timeout) is reported as
+    /// `Unavailable`, never a crash (INV-11).
+    async fn run_diff(&self) -> Result<CommandOutcome, RuntimeError> {
+        let launcher = xlightcli_tools::ProcessLauncher::new();
+        let cancel = CancellationToken::new();
+        let spec = xlightcli_tools::SpawnSpec {
+            purpose: xlightcli_tools::SpawnPurpose::Git,
+            program: "git".to_string(),
+            args: vec!["diff".to_string(), "--no-color".to_string()],
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            env: xlightcli_tools::EnvPolicy::scrubbed(),
+            timeout: Some(std::time::Duration::from_secs(30)),
+            cancel: cancel.clone(),
+        };
+        let process = match launcher.spawn(spec).await {
+            Ok(process) => process,
+            Err(err) => {
+                return Ok(CommandOutcome::Unavailable {
+                    reason: format!("could not run `git diff`: {err}"),
+                });
+            }
+        };
+        let mut spool = match xlightcli_tools::OutputSpool::create(
+            &xlightcli_config::paths::artifacts_dir(),
+            SessionId::new(),
+            ToolCallId::new("core.diff"),
+            xlightcli_tools::SpoolLimits::from_config(&self.state.deps.config.tools),
+        )
+        .await
+        {
+            Ok(spool) => spool,
+            Err(err) => {
+                return Ok(CommandOutcome::Unavailable {
+                    reason: format!("could not open a spool for `git diff`'s output: {err}"),
+                });
+            }
+        };
+        let status = process.pipe_into(&mut spool).await;
+        let Ok(summary) = spool.finish().await else {
+            return Ok(CommandOutcome::Unavailable {
+                reason: "could not finish the `git diff` output spool".to_string(),
+            });
+        };
+        match status {
+            Ok(exit) if exit.success() => {
+                if summary.total_bytes == 0 {
+                    Ok(CommandOutcome::Message(
+                        "No changes (working tree clean).".to_string(),
+                    ))
+                } else {
+                    Ok(CommandOutcome::Message(format!(
+                        "{}\n...\n{}",
+                        summary.head_text(),
+                        summary.tail_text()
+                    )))
+                }
+            }
+            _ => Ok(CommandOutcome::Unavailable {
+                reason: "`git diff` failed or timed out — is this a git repository?".to_string(),
+            }),
+        }
+    }
+
+    /// Answers a pending `UiEvent::PermissionRequested`: correlates `tool_call_id` with the
+    /// `crate::permission_gate::RuntimePermissionGate` awaiting it and resolves its oneshot.
     pub async fn respond_to_permission(
         &self,
         tool_call_id: ToolCallId,
-        _response: PermissionResponse,
+        response: PermissionResponse,
     ) -> Result<(), RuntimeError> {
-        Err(RuntimeError::NoPendingPermission(tool_call_id))
+        let sender = self
+            .state
+            .pending_permissions
+            .lock()
+            .await
+            .remove(&tool_call_id);
+        match sender {
+            Some(tx) => {
+                // The gate may have already given up (e.g. the turn was cancelled while this
+                // answer was in flight); a dropped receiver here is not an error for the caller.
+                let _ = tx.send(response);
+                Ok(())
+            }
+            None => Err(RuntimeError::NoPendingPermission(tool_call_id)),
+        }
     }
 
-    /// Cancels the in-flight turn for `session_id`, if any. Wave B: cancels the session's
-    /// `CancellationToken`; for now, always reports no active turn.
+    /// Cancels the in-flight turn for `session_id`, if any.
     pub async fn cancel_turn(&self, session_id: SessionId) -> Result<(), RuntimeError> {
         self.get_session(session_id).await?;
-        Err(RuntimeError::NoActiveTurn(session_id))
+        match self.state.active_turns.lock().await.get(&session_id) {
+            Some(token) => {
+                token.cancel();
+                Ok(())
+            }
+            None => Err(RuntimeError::NoActiveTurn(session_id)),
+        }
     }
 
     /// Cycles or sets the execution mode (Shift+Tab, D-025) for `session_id`.
@@ -359,11 +724,10 @@ mod tests {
 
     use super::*;
 
-    async fn test_handle() -> (RuntimeHandle, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = xlightcli_storage::Storage::open(dir.path().join("test.db"))
-            .await
-            .unwrap();
+    /// Opens (creating if needed) a `RuntimeHandle` backed by real storage at `path` — shared by
+    /// [`test_handle`] (fresh tempdir) and the crash-recovery test below (same path, reopened).
+    async fn test_handle_at(path: std::path::PathBuf) -> RuntimeHandle {
+        let storage = xlightcli_storage::Storage::open(path).await.unwrap();
         let deps = RuntimeDeps {
             providers: Arc::new(xlightcli_provider::ProviderRegistry::new()),
             auth: Arc::new(xlightcli_auth::AuthBroker::new()),
@@ -371,7 +735,13 @@ mod tests {
             storage,
             config: xlightcli_config::Config::default(),
         };
-        (RuntimeHandle::new(deps, RuntimeConfig::default()), dir)
+        RuntimeHandle::new(deps, RuntimeConfig::default())
+    }
+
+    async fn test_handle() -> (RuntimeHandle, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = test_handle_at(dir.path().join("test.db")).await;
+        (handle, dir)
     }
 
     #[tokio::test]
@@ -462,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_resolves_core_commands_as_unavailable() {
+    async fn run_command_help_returns_a_real_message() {
         let (handle, _dir) = test_handle().await;
         let workspace = handle
             .state
@@ -483,6 +853,91 @@ mod tests {
             .unwrap();
 
         let outcome = handle.run_command(session_id, "/help").await.unwrap();
+        match outcome {
+            CommandOutcome::Message(text) => assert!(text.contains("/help")),
+            other => panic!("expected a Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_status_reports_session_metadata() {
+        let (handle, _dir) = test_handle().await;
+        let workspace = handle
+            .state
+            .deps
+            .storage
+            .create_workspace(std::path::PathBuf::from("/repo"), None)
+            .await
+            .unwrap();
+        let session_id = handle
+            .create_session(
+                workspace,
+                ProviderId::new("codex"),
+                TransportId::new("chatgpt"),
+                ModelId::new("gpt-5"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = handle.run_command(session_id, "/status").await.unwrap();
+        match outcome {
+            CommandOutcome::Message(text) => {
+                assert!(text.contains("codex"));
+                assert!(text.contains("gpt-5"));
+            }
+            other => panic!("expected a Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_mode_cycles_execution_mode() {
+        let (handle, _dir) = test_handle().await;
+        let workspace = handle
+            .state
+            .deps
+            .storage
+            .create_workspace(std::path::PathBuf::from("/repo"), None)
+            .await
+            .unwrap();
+        let session_id = handle
+            .create_session(
+                workspace,
+                ProviderId::new("codex"),
+                TransportId::new("chatgpt"),
+                ModelId::new("gpt-5"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        handle.run_command(session_id, "/mode").await.unwrap();
+        let session = handle.get_session(session_id).await.unwrap();
+        assert_eq!(session.mode, xlightcli_tools::ExecutionMode::AcceptEdits);
+    }
+
+    #[tokio::test]
+    async fn run_command_compact_is_unavailable() {
+        let (handle, _dir) = test_handle().await;
+        let workspace = handle
+            .state
+            .deps
+            .storage
+            .create_workspace(std::path::PathBuf::from("/repo"), None)
+            .await
+            .unwrap();
+        let session_id = handle
+            .create_session(
+                workspace,
+                ProviderId::new("codex"),
+                TransportId::new("chatgpt"),
+                ModelId::new("gpt-5"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = handle.run_command(session_id, "/compact").await.unwrap();
         assert!(matches!(outcome, CommandOutcome::Unavailable { .. }));
     }
 
@@ -512,5 +967,74 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RuntimeError::UnknownCommand(_)));
+    }
+
+    /// docs/PLAN.md §11.2 "an in-progress turn is marked Interrupted" + this Wave B brief's
+    /// "resume after simulated crash": a session left `active` (no `update_session_status` call —
+    /// simulating a process that died mid-turn) must (1) come back as `Interrupted` the next time
+    /// `Storage::open` runs against the same file (it does this automatically), and (2)
+    /// `ensure_agent` must recover the previously-registered root agent instead of registering a
+    /// second one.
+    #[tokio::test]
+    async fn resume_after_simulated_crash_recovers_status_and_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let session_id;
+        let agent_id_before_crash;
+        {
+            let handle = test_handle_at(db_path.clone()).await;
+            let workspace = handle
+                .state
+                .deps
+                .storage
+                .create_workspace(std::path::PathBuf::from("/repo"), None)
+                .await
+                .unwrap();
+            session_id = handle
+                .create_session(
+                    workspace,
+                    ProviderId::new("codex"),
+                    TransportId::new("chatgpt"),
+                    ModelId::new("gpt-5"),
+                    None,
+                )
+                .await
+                .unwrap();
+            let session = handle.get_session(session_id).await.unwrap();
+            agent_id_before_crash = handle.ensure_agent(&session).await.unwrap();
+            // No `update_session_status` call and `handle` is dropped here — simulating a crash
+            // mid-turn: the session is left `active` and only ever has its root agent registered.
+        }
+
+        // "Restart": reopen storage at the same path. `Storage::open` calls
+        // `mark_interrupted_on_open` automatically.
+        let handle = test_handle_at(db_path).await;
+        let record = handle
+            .state
+            .deps
+            .storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, xlightcli_storage::SessionStatus::Interrupted);
+
+        handle.resume_session(session_id).await.unwrap();
+        let session = handle.get_session(session_id).await.unwrap();
+        let agent_id_after_resume = handle.ensure_agent(&session).await.unwrap();
+        assert_eq!(
+            agent_id_before_crash, agent_id_after_resume,
+            "ensure_agent must recover the previously-registered root agent, not duplicate it"
+        );
+
+        let agents = handle
+            .state
+            .deps
+            .storage
+            .list_agents(session_id)
+            .await
+            .unwrap();
+        assert_eq!(agents.len(), 1);
     }
 }

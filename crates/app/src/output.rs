@@ -81,6 +81,13 @@ pub fn confirm(prompt: &str) -> Result<bool, CliError> {
 /// Renders one `AgentEvent` from a `dev probe` stream. Returns `true` if it produced output
 /// visible to the user (stdout or stderr) — used by the streaming loop to decide between
 /// `CliError::Other` and `CliError::Partial` if the stream later errors out.
+///
+/// **`AgentEvent::Usage` is deliberately not printed here** (D-030 accepted gap, now closed): a
+/// transport may emit it several times per turn (incremental usage reporting, `event.rs`'s own
+/// doc comment: "may appear multiple times"), which used to print a `[usage]` line every time.
+/// `Completed.usage` is the final, authoritative total for the turn, so that's the only usage line
+/// `dev probe` prints — once, at the end. `Usage` events still count as "produced output" (the
+/// stream is doing something), they just don't render a line.
 pub fn render_event(event: &AgentEvent) -> bool {
     match event {
         AgentEvent::TurnStarted { .. } => false,
@@ -96,10 +103,7 @@ pub fn render_event(event: &AgentEvent) -> bool {
             tool_call_started(name, id.as_str());
             true
         }
-        AgentEvent::Usage(u) => {
-            usage(u);
-            true
-        }
+        AgentEvent::Usage(_) => true,
         AgentEvent::RateLimit(r) => {
             rate_limit(r);
             true
@@ -118,14 +122,90 @@ pub fn exec_text(response: &str) {
     println!("{response}");
 }
 
-/// `xlightcli exec --output-format json` (and, until Wave B adds real incremental streaming,
-/// `stream-json` too): the `{conversation_id, status, response, usage}` shape from
-/// docs/commands.md §5.
+/// `xlightcli exec --output-format json` — and the final line of `stream-json` too: the
+/// `{conversation_id, status, response, usage}` shape from docs/commands.md §5.
 pub fn exec_json(result: &xlightcli_runtime::ExecOutput) -> Result<(), CliError> {
     let text = serde_json::to_string(result)
         .map_err(|e| CliError::other(format!("failed to serialize exec output: {e}")))?;
     println!("{text}");
     Ok(())
+}
+
+/// Builds one JSON line for `xlightcli exec --output-format stream-json`'s incremental event
+/// stream (docs/commands.md §5, `cmd::exec::run_streaming`). Returns `None` for events that don't
+/// matter to a headless, single-turn caller (`SessionChanged`/`ModeChanged` — `exec` never
+/// switches session or execution mode mid-turn).
+pub fn stream_json_event(event: &xlightcli_runtime::UiEvent) -> Option<serde_json::Value> {
+    use xlightcli_runtime::UiEvent;
+    let value = match event {
+        UiEvent::TurnStarted { model, .. } => serde_json::json!({
+            "type": "turn_started",
+            "model": model.to_string(),
+        }),
+        UiEvent::TextDelta { text, .. } => serde_json::json!({
+            "type": "text_delta",
+            "text": text,
+        }),
+        UiEvent::ReasoningDelta { text, .. } => serde_json::json!({
+            "type": "reasoning_delta",
+            "text": text,
+        }),
+        UiEvent::ToolCallStarted { call_id, name, .. } => serde_json::json!({
+            "type": "tool_call_started",
+            "call_id": call_id.as_str(),
+            "name": name,
+        }),
+        UiEvent::ToolCallFinished {
+            call_id, summary, ..
+        } => serde_json::json!({
+            "type": "tool_call_finished",
+            "call_id": call_id.as_str(),
+            "name": summary.name,
+            "text_preview": summary.text_preview,
+            "artifact": summary.artifact.as_ref().map(|a| a.path.display().to_string()),
+        }),
+        UiEvent::PermissionRequested { request, .. } => serde_json::json!({
+            "type": "permission_requested",
+            "action": request.action,
+            "target": request.target,
+            "reason": request.reason,
+        }),
+        UiEvent::Usage { usage, .. } => serde_json::json!({
+            "type": "usage",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+        }),
+        UiEvent::RateLimit { info, .. } => serde_json::json!({
+            "type": "rate_limit",
+            "limit": info.limit,
+            "remaining": info.remaining,
+            "reset_at": info.reset_at.map(|t| t.to_string()),
+        }),
+        UiEvent::TurnCompleted { stop, .. } => serde_json::json!({
+            "type": "turn_completed",
+            "stop": format!("{stop:?}"),
+        }),
+        UiEvent::TurnFailed { error, .. } => serde_json::json!({
+            "type": "turn_failed",
+            "error": xlightcli_auth::redact::redact(error),
+        }),
+        UiEvent::Notice { level, message } => serde_json::json!({
+            "type": "notice",
+            "level": format!("{level:?}").to_ascii_lowercase(),
+            "message": message,
+        }),
+        UiEvent::SessionChanged { .. } | UiEvent::ModeChanged { .. } => return None,
+    };
+    Some(value)
+}
+
+/// Prints one already-built `stream-json` line to stdout, unbuffered (same rationale as
+/// `text_delta`: streaming should feel live even when piped).
+pub fn exec_stream_json_line(value: &serde_json::Value) {
+    println!("{value}");
+    let _ = std::io::stdout().flush();
 }
 
 #[cfg(test)]

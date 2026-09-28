@@ -4,10 +4,11 @@
 //! command implementations. `src/main.rs` is a thin wrapper around [`run`] — splitting it this
 //! way lets `crates/app/tests/*.rs` exercise the CLI in-process instead of spawning a subprocess.
 //!
-//! **Status: Phase 1 Wave A.** `dev probe`, `auth {list,login,logout,import}`, `provider
-//! {list,info}` (Phase 0) plus `exec` and a bare-TUI entry point (docs/PLAN.md §18.3) now parse
-//! and wire up correctly; `exec`'s turn execution and `init`'s wizard are Wave B stubs (see
-//! `cmd::exec`/`cmd::init`). `config` still doesn't exist as a CLI subcommand.
+//! **Status: Phase 1 Wave B.** `dev probe`, `auth {list,login,logout,import}`, `provider
+//! {list,info}` (Phase 0) plus `exec` (real turn execution via `xlightcli_runtime::run_exec`,
+//! exit codes 0/1/2/3, incremental `stream-json`), `init` (config skeleton + AGENTS.md), and
+//! bare-TUI entry point (docs/PLAN.md §18.3). Layered configuration and workspace trust are
+//! wired via `ConfigLoader` and `TrustStore`. `config` subcommand not done yet.
 
 pub mod cli;
 pub mod cmd;
@@ -104,7 +105,7 @@ async fn execute(cli: &Cli, ctx: &AppContext) -> Result<(), CliError> {
         None => {
             let runtime = wiring::build_runtime()
                 .await
-                .map_err(|e| CliError::other(format!("failed to open storage: {e}")))?;
+                .map_err(|e| CliError::other(format!("failed to initialize runtime: {e}")))?;
             xlightcli_tui::run(runtime.handle, xlightcli_tui::TuiOptions::default())
                 .await
                 .map_err(|e| CliError::other(e.to_string()))

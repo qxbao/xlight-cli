@@ -96,12 +96,18 @@ impl ToolError {
 /// Resolves a tool-supplied relative path against the workspace root, rejecting any path that
 /// would escape it (PATTERNS.md §7).
 ///
-/// **Scope decision (documented, Phase 1 Wave A):** this performs a purely *lexical* resolution
-/// (join + collapse `.`/`..` components, then check the result still starts with the root) — it
-/// does not consult the filesystem, so it does not yet catch a symlink whose target itself
-/// escapes the root. That check (canonicalizing each existing ancestor) is a Wave B addition; the
-/// lexical check already blocks the common `../../etc/passwd`-style traversal attempts and never
-/// needs the target path to exist (important for `write_file` creating a new file).
+/// **Phase 1 Wave B hardening:** first does the Wave A *lexical* resolution (join + collapse
+/// `.`/`..` components, then check the result still starts with the root); then, when the
+/// workspace root itself exists on disk, also canonicalizes the deepest *existing* ancestor of
+/// the candidate path and checks that canonical ancestor still starts with the canonical root —
+/// this catches a symlink (anywhere along the path, not just the final component) whose target
+/// escapes the root, which the lexical check alone cannot see. The remaining, not-yet-existing
+/// components (e.g. a `write_file` target whose parent directories don't exist yet) are re-joined
+/// onto the canonical ancestor unchanged, so a fresh path still resolves without requiring the
+/// full path to exist.
+///
+/// If the root doesn't exist on disk (e.g. a synthetic root used in a unit test), there is
+/// nothing meaningful to canonicalize against, so this falls back to the lexical result only.
 #[derive(Debug, Clone)]
 pub struct WorkspacePath {
     root: PathBuf,
@@ -122,7 +128,25 @@ impl WorkspacePath {
         if !normalized.starts_with(&self.root) {
             return Err(ToolError::PathEscape(candidate.display().to_string()));
         }
-        Ok(normalized)
+
+        let Ok(canonical_root) = self.root.canonicalize() else {
+            // The workspace root itself doesn't exist on disk — nothing to canonicalize
+            // against, fall back to the lexical result (keeps the Wave A behavior for tests
+            // that use a synthetic, non-existent root).
+            return Ok(normalized);
+        };
+
+        let (existing_ancestor, remainder) = deepest_existing_ancestor(&normalized, &self.root);
+        let canonical_ancestor = existing_ancestor.canonicalize().map_err(ToolError::Io)?;
+        if !canonical_ancestor.starts_with(&canonical_root) {
+            return Err(ToolError::PathEscape(candidate.display().to_string()));
+        }
+
+        let mut rebuilt = canonical_ancestor;
+        for component in remainder {
+            rebuilt.push(component);
+        }
+        Ok(rebuilt)
     }
 }
 
@@ -138,6 +162,29 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Walks `path` upward, component by component, until it finds one that exists on disk (or hits
+/// `root`, which the caller has already established exists). Returns that existing ancestor plus
+/// the trailing components that don't exist yet, in original (shallow-to-deep) order, ready to be
+/// re-appended to a canonicalized ancestor.
+fn deepest_existing_ancestor(path: &Path, root: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    while current != root && !current.exists() {
+        match current.file_name().map(|n| n.to_os_string()) {
+            Some(name) => {
+                remainder.push(name);
+                current = current
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.to_path_buf());
+            }
+            None => break,
+        }
+    }
+    remainder.reverse();
+    (current, remainder)
 }
 
 /// Everything a `Tool::run` needs, besides its parsed input. **No credentials** (INV-4): a tool
@@ -297,5 +344,50 @@ mod tests {
         assert!(text.contains("head"));
         assert!(text.contains("tail"));
         assert!(text.contains("truncated"));
+    }
+
+    #[test]
+    fn resolve_allows_a_not_yet_existing_write_target_under_a_real_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspacePath::new(dir.path());
+        let resolved = ws.resolve("new/nested/file.txt").unwrap();
+        assert_eq!(
+            resolved,
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("new/nested/file.txt")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_blocks_a_symlink_that_escapes_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let ws = WorkspacePath::new(root.path());
+        let err = ws.resolve("escape/secret.txt").unwrap_err();
+        assert!(matches!(err, ToolError::PathEscape(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_allows_a_symlink_that_stays_inside_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("link")).unwrap();
+
+        let ws = WorkspacePath::new(root.path());
+        let resolved = ws.resolve("link/file.txt").unwrap();
+        assert_eq!(
+            resolved,
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("real")
+                .join("file.txt")
+        );
     }
 }

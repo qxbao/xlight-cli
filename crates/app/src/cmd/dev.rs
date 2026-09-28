@@ -69,6 +69,17 @@ pub async fn models(
 }
 
 /// `dev quota`: plan/quota snapshot (`TransportAdapter::quota`, D-027).
+///
+/// **D-030 accepted gap, now closed:** the summary line used to always echo
+/// `QuotaSnapshot::used_percent`/`resets_at` verbatim — but each provider's `quota.rs` picks a
+/// single "primary" bucket to fill those fields with its own heuristic (e.g. `provider-agy` always
+/// prefers the Gemini 5h window over weekly, `docs/providers/agy.md`), which can disagree with
+/// which bucket is actually most exhausted (observed: `used: 0.0%` from a fresh 5h window while
+/// the weekly window sat at ~8%). This now walks `QuotaSnapshot::detail` itself
+/// ([`extract_buckets`]) to print one line per bucket found and picks the summary from whichever
+/// bucket has the *highest* `used_percent`, independent of the provider's own bucket choice. Falls
+/// back to the top-level `used_percent`/`resets_at` fields when `detail` has no recognizable
+/// bucket shape (e.g. a transport with no detail at all).
 pub async fn quota(
     ctx: &AppContext,
     provider_arg: &str,
@@ -90,15 +101,48 @@ pub async fn quota(
         "plan:         {}",
         q.plan.as_deref().unwrap_or("-")
     ));
-    crate::output::info(&format!(
-        "used:         {}",
-        q.used_percent
-            .map_or("-".to_string(), |p| format!("{p:.1}%"))
-    ));
-    crate::output::info(&format!(
-        "resets at:    {}",
-        q.resets_at.map_or("-".to_string(), |t| t.to_string())
-    ));
+
+    let buckets = extract_buckets(&q.detail);
+    if buckets.is_empty() {
+        crate::output::info(&format!(
+            "used:         {}",
+            q.used_percent
+                .map_or("-".to_string(), |p| format!("{p:.1}%"))
+        ));
+        crate::output::info(&format!(
+            "resets at:    {}",
+            q.resets_at.map_or("-".to_string(), |t| t.to_string())
+        ));
+    } else {
+        crate::output::info("buckets:");
+        for bucket in &buckets {
+            crate::output::info(&format!(
+                "  {:<16} {:<12} used {:>5.1}%  resets {}",
+                bucket.group,
+                bucket.window,
+                bucket.used_percent,
+                bucket.resets_at.as_deref().unwrap_or("-"),
+            ));
+        }
+        // `total_cmp` (not `partial_cmp`) since `used_percent` is always a finite f32 here (every
+        // producer clamps it), so there is no `NaN` case to worry about either way. `if let`
+        // instead of `.expect()` even though `buckets` is non-empty in this branch (D-016: no
+        // `expect()` outside tests, even for a "can't actually happen" case).
+        if let Some(most_used) = buckets
+            .iter()
+            .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
+        {
+            crate::output::info(&format!(
+                "used:         {:.1}%  (most-used bucket: {}/{})",
+                most_used.used_percent, most_used.group, most_used.window
+            ));
+            crate::output::info(&format!(
+                "resets at:    {}",
+                most_used.resets_at.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+
     if !q.detail.is_null() {
         let detail = serde_json::to_string_pretty(&q.detail).unwrap_or_default();
         crate::output::info(&format!(
@@ -107,6 +151,109 @@ pub async fn quota(
         ));
     }
     Ok(())
+}
+
+/// One quota bucket found by [`extract_buckets`]: a group label (best-effort, e.g. `"Gemini"`), a
+/// window label (e.g. `"5h"`/`"weekly"`/`"primary"`), how much of it is used, and (if present) a
+/// human-readable reset time/duration.
+#[derive(Debug, Clone, PartialEq)]
+struct QuotaBucket {
+    group: String,
+    window: String,
+    used_percent: f32,
+    resets_at: Option<String>,
+}
+
+fn bucket_used_percent(obj: &serde_json::Map<String, serde_json::Value>) -> Option<f32> {
+    if let Some(fraction) = obj
+        .get("remainingFraction")
+        .and_then(serde_json::Value::as_f64)
+    {
+        return Some(((1.0 - fraction) * 100.0).clamp(0.0, 100.0) as f32);
+    }
+    if let Some(percent) = obj
+        .get("remainingPercentage")
+        .and_then(serde_json::Value::as_f64)
+    {
+        return Some((100.0 - percent).clamp(0.0, 100.0) as f32);
+    }
+    if let Some(utilization) = obj.get("utilization").and_then(serde_json::Value::as_f64) {
+        return Some((utilization * 100.0).clamp(0.0, 100.0) as f32);
+    }
+    if let Some(used) = obj.get("used_percent").and_then(serde_json::Value::as_f64) {
+        return Some(used.clamp(0.0, 100.0) as f32);
+    }
+    None
+}
+
+fn bucket_reset_label(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    if let Some(s) = obj.get("resetTime").and_then(serde_json::Value::as_str) {
+        return Some(s.to_string());
+    }
+    if let Some(s) = obj.get("resets_at").and_then(serde_json::Value::as_str) {
+        return Some(s.to_string());
+    }
+    if let Some(secs) = obj
+        .get("resets_in_seconds")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return Some(format!("in {secs}s"));
+    }
+    None
+}
+
+/// A best-effort human label for `obj`, preferring an explicit name-shaped field over the raw JSON
+/// key it was found under (`fallback`).
+fn bucket_label(obj: &serde_json::Map<String, serde_json::Value>, fallback: &str) -> String {
+    for key in ["displayName", "window", "bucketId", "description"] {
+        if let Some(s) = obj.get(key).and_then(serde_json::Value::as_str)
+            && !s.is_empty()
+        {
+            return s.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
+/// Walks `detail` looking for bucket-shaped objects — anything with a recognizable
+/// remaining/utilization/used-percent field — and collects one [`QuotaBucket`] per match, tagging
+/// each with a best-effort `(group, window)` label pair from its surrounding JSON.
+///
+/// Deliberately shape-agnostic rather than hardcoding one provider's `detail` schema
+/// (docs/commands.md §6 — `provider-agy`'s `groups[].buckets[]`, `provider-claude`'s
+/// `window_5h`/`window_7d`, `provider-codex`'s `primary`/`rate_limits.primary` are three different
+/// shapes): `QuotaSnapshot::detail` is documented as opaque to core (D-027), so this recognizes
+/// bucket-like objects by field name rather than by provider, and stops recursing into an object
+/// as soon as it matches (a bucket's own fields are never themselves nested buckets).
+fn extract_buckets(detail: &serde_json::Value) -> Vec<QuotaBucket> {
+    fn walk(value: &serde_json::Value, group: &str, path_key: &str, out: &mut Vec<QuotaBucket>) {
+        match value {
+            serde_json::Value::Object(obj) => {
+                if let Some(used_percent) = bucket_used_percent(obj) {
+                    out.push(QuotaBucket {
+                        group: group.to_string(),
+                        window: bucket_label(obj, path_key),
+                        used_percent,
+                        resets_at: bucket_reset_label(obj),
+                    });
+                    return;
+                }
+                let next_group = bucket_label(obj, group);
+                for (key, child) in obj {
+                    walk(child, &next_group, key, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, group, path_key, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(detail, "-", "-", &mut out);
+    out
 }
 
 /// Shared lookup for `dev` commands: provider → transport (default: first stable) → stored
@@ -255,10 +402,85 @@ fn fail(produced_output: bool, msg: String) -> CliError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
     use xlightcli_protocol::{AgentEvent, AuthKind, Message, Role, StopReason, Usage};
     use xlightcli_provider::testing::MockProvider;
 
     use super::*;
+
+    /// Regression test for the D-030 gap: a fresh (0%-used) 5h bucket must not hide a
+    /// significantly more exhausted weekly bucket in the summary line.
+    #[test]
+    fn most_used_bucket_wins_even_when_it_is_not_the_first_one() {
+        let detail = json!({
+            "groups": [{
+                "displayName": "Gemini",
+                "buckets": [
+                    {"window": "5h", "remainingFraction": 1.0},
+                    {"window": "weekly", "remainingFraction": 0.92, "resetTime": "2026-10-01T00:00:00Z"}
+                ]
+            }]
+        });
+        let buckets = extract_buckets(&detail);
+        assert_eq!(buckets.len(), 2);
+        let most_used = buckets
+            .iter()
+            .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
+            .unwrap();
+        assert_eq!(most_used.window, "weekly");
+        assert!((most_used.used_percent - 8.0).abs() < 0.01);
+        assert_eq!(most_used.resets_at.as_deref(), Some("2026-10-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn extract_buckets_reads_agy_groups_and_buckets_shape() {
+        let detail = json!({
+            "groups": [{
+                "displayName": "Claude",
+                "buckets": [{"window": "weekly", "remainingPercentage": 40.0}]
+            }]
+        });
+        let buckets = extract_buckets(&detail);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].group, "Claude");
+        assert_eq!(buckets[0].window, "weekly");
+        assert_eq!(buckets[0].used_percent, 60.0);
+    }
+
+    #[test]
+    fn extract_buckets_reads_claude_window_shape() {
+        let detail = json!({
+            "window_5h": {"utilization": 0.5, "resets_at": "2026-10-01T00:00:00Z"},
+            "window_7d": {"utilization": 0.2, "resets_at": serde_json::Value::Null},
+        });
+        let mut buckets = extract_buckets(&detail);
+        buckets.sort_by(|a, b| a.window.cmp(&b.window));
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].window, "window_5h");
+        assert_eq!(buckets[0].used_percent, 50.0);
+        assert_eq!(buckets[1].window, "window_7d");
+        assert_eq!(buckets[1].used_percent, 20.0);
+    }
+
+    #[test]
+    fn extract_buckets_reads_codex_primary_shape() {
+        let detail = json!({
+            "plan_type": "plus",
+            "primary": {"used_percent": 42.5, "resets_in_seconds": 3600}
+        });
+        let buckets = extract_buckets(&detail);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].window, "primary");
+        assert_eq!(buckets[0].used_percent, 42.5);
+        assert_eq!(buckets[0].resets_at.as_deref(), Some("in 3600s"));
+    }
+
+    #[test]
+    fn extract_buckets_on_shapeless_detail_is_empty() {
+        assert!(extract_buckets(&json!({"foo": "bar"})).is_empty());
+        assert!(extract_buckets(&serde_json::Value::Null).is_empty());
+    }
 
     fn test_account() -> xlightcli_auth::AccountInfo {
         xlightcli_auth::AccountInfo {

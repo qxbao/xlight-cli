@@ -20,9 +20,9 @@
 | `xlightcli-auth` | **usable** (Wave 2) — keyring/file store, loopback server, device code, single-flight refresh with generation counter, `AuthBroker::credential/login/import/accounts/logout` all implemented | — |
 | `xlightcli-provider` | **complete infra** — trait, SSE parser, http, retry, gate, `map_status`, `testing` | Don't change the trait; just use it |
 | `xlightcli-provider-{codex,claude,agy}` | skeleton — struct + constructor + empty modules | Implement `auth`, `wire`, `transport_*`, `quota`, `import`, `features` + `impl Provider` |
-| `xlightcli-tools` | **usable** (Wave A) — `Tool`/`ToolContext`/`ToolRegistry`, `PermissionEngine`/`PermissionGate` (real rule evaluation), `ProcessLauncher`/`OutputSpool` (real, tested); built-in tool *structs* registered but every `run` body is `ToolError::NotImplemented`; see §9 | Implement each built-in tool's body (`crate::builtin`) |
+| `xlightcli-tools` | **usable** (Wave B) — `Tool`/`ToolContext`/`ToolRegistry`, `PermissionEngine`/`PermissionGate` (real rule evaluation), `ProcessLauncher`/`OutputSpool` (real, tested); all 9 built-in tools have real, tested `run` bodies; `WorkspacePath::resolve` now also canonicalizes existing ancestors to catch a symlink escape; see §9 | Nothing changes once `runtime` wires a real `PermissionGate`/`ToolContext` construction path |
 | `xlightcli-mcp` | empty skeleton (doc comment) | Phase 3 |
-| `xlightcli-runtime` | **usable** (Wave A) — `RuntimeHandle` (real channel/session plumbing), `CommandRegistry` + core commands, `ContextManager`'s token-estimate/compaction-trigger, `ExecOptions`/`ExecOutput`; `AgentLoop::run_turn`/`ContextManager::build_turn_request`/`exec::run_exec` are stubs; see §10 | Implement `AgentLoop::run_turn`, `ContextManager::build_turn_request`, `exec::run_exec` |
+| `xlightcli-runtime` | **usable** (Wave B) — `RuntimeHandle` (real channel/session plumbing, real core-command bodies, real `submit_user_input`/`respond_to_permission`/`cancel_turn`), `AgentLoop::run_turn` (real multi-step tool loop + permission gate + partial-output-on-error), `ContextManager::build_turn_request` (real), `exec::run_exec` (real); see §10 for the exact (changed) shapes | Later: real LLM-based compaction + persisted `summaries`, `/compact`/`/login`/`/logout` bodies, workspace-trust check for `--dangerously-skip-permissions`, `stream-json` incremental rendering (app-side) |
 | `xlightcli-tui` | **usable** (Wave A) — real terminal lifecycle (`run`), `App`/`view::*`/`Keymap`/`Theme` module skeleton, no rendering; see §11 | Implement `ratatui` rendering for each view |
 | `xlightcli` (app), `xtask` | **usable** (Wave A) — `exec`/`init` CLI surface + bare-TUI entry wired to real `RuntimeHandle` construction; `exec`'s turn + `init`'s wizard are stubs; see §12 | Nothing changes once `runtime`'s stubs are filled in |
 
@@ -767,8 +767,11 @@ impl WorkspacePath {
     pub fn new(root: impl Into<PathBuf>) -> Self;
     pub fn root(&self) -> &Path;
     pub fn resolve(&self, relative: impl AsRef<Path>) -> Result<PathBuf, ToolError>;
-    // Lexical only (join + collapse `.`/`..`, then must still start_with root) — does not yet
-    // canonicalize existing ancestors to catch a symlink escape (documented Wave A scope decision).
+    // Wave B: lexical resolution (join + collapse `.`/`..`, must still start_with root) PLUS
+    // canonicalizing the deepest existing ancestor to catch a symlink escape anywhere along the
+    // path; the not-yet-existing trailing components (e.g. a fresh write_file target) are
+    // re-joined onto the canonical ancestor unchanged. Falls back to the lexical-only result when
+    // the root itself doesn't exist on disk (e.g. a synthetic root in a unit test).
 }
 
 pub struct ToolSpoolConfig { pub artifacts_dir: PathBuf, pub limits: SpoolLimits }
@@ -865,16 +868,31 @@ impl OutputSpool {
 ```
 
 Built-in tool structs (`crate::builtin`, all registered by `ToolRegistry::with_builtins`, every
-`run` body `Err(ToolError::NotImplemented { .. })`): `ReadFile`, `WriteFile`, `EditFile`, `ListDir`,
-`Glob` (`builtin::fs`); `Grep` (`builtin::grep`); `Shell` (`builtin::shell`); `GitStatus`, `GitDiff`
-(`builtin::git`). Each has a real `ToolDefinition` (JSON schema generated via `schemars` from its
-`*Args` struct).
+`run` body implemented and integration-tested, `crates/tools/tests/{fs,grep,shell,git}.rs`):
+`ReadFile`, `WriteFile`, `EditFile`, `ListDir`, `Glob` (`builtin::fs`); `Grep` (`builtin::grep`);
+`Shell` (`builtin::shell`); `GitStatus`, `GitDiff` (`builtin::git`). Each has a real
+`ToolDefinition` (JSON schema generated via `schemars` from its `*Args` struct). `read_file` streams
+through `ctx.open_spool()` above 256 KiB and sniffs the first 8 KiB for a `\0` byte to reject binary
+files; `edit_file` requires an exact, unique `old_string` match and returns a `similar` unified diff;
+`glob`/`grep` walk via `ignore::WalkBuilder::new(root).require_git(false)` (so `.gitignore` is
+honored even when the workspace root isn't itself a git checkout) capped at 5000 results/matches;
+`shell` spawns `bash -lc "<command>"` via `ctx.launcher` and appends a trailing
+`[exit code: N]`/`[terminated by signal]` marker to the spooled output; `git_status`/`git_diff` spawn
+the real `git` binary via `ctx.launcher` (`SpawnPurpose::Git`) and surface a non-zero exit as
+`ToolError::InvalidInput` with the captured output. Known gap: `shell`'s default timeout
+(`DEFAULT_SHELL_TIMEOUT_SECS = 120`) is a local constant mirroring
+`xlightcli_config::ToolsConfig::shell_timeout_secs`'s own default — `ToolContext` doesn't carry a
+`ToolsConfig` reference, so a caller that wants the *configured* value must resolve it itself and
+pass `timeout_secs` explicitly.
 
 ---
 
-## 10. `xlightcli-runtime` (Phase 1 Wave A)
+## 10. `xlightcli-runtime` (Phase 1 Wave B)
 
-Never depends on a `provider-*` crate (INV-2, `cargo xtask check-deps`).
+Never depends on a `provider-*` crate (INV-2, `cargo xtask check-deps`). Every `RuntimeHandle`
+method signature below is **unchanged** from Wave A. `AgentLoop::run_turn`'s signature changed
+(see below) — it is only ever called from `RuntimeHandle::submit_user_input`/`crate::exec::run_exec`
+(both inside this crate), so the change isn't visible to `tui`/`app`.
 
 ```rust
 // handle.rs
@@ -918,9 +936,17 @@ impl RuntimeHandle {
     pub async fn list_sessions(&self) -> Result<Vec<xlightcli_storage::SessionRecord>, RuntimeError>;
     pub async fn resume_session(&self, session_id: SessionId) -> Result<(), RuntimeError>;
     pub async fn submit_user_input(&self, session_id: SessionId, text: String) -> Result<(), RuntimeError>;
+    // Real (Wave B): registers/recovers the session's root agent (`ensure_agent`, crash-recovery
+    // safe — reuses the previously-registered agent via `Storage::list_agents` instead of
+    // duplicating it), then drives one `AgentLoop::run_turn`, streaming `UiEvent`s the whole way.
     pub async fn run_command(&self, session_id: SessionId, raw: &str) -> Result<CommandOutcome, RuntimeError>;
+    // Real bodies (Wave B) for every core command except `/compact`/`/login`/`/logout`, which
+    // return `Unavailable` with a clear reason (INV-10): persisted compaction summaries and an
+    // interactive login/logout surface aren't implemented yet — see CODEBASE.md §2's `runtime` row.
     pub async fn respond_to_permission(&self, tool_call_id: ToolCallId, response: PermissionResponse) -> Result<(), RuntimeError>;
+    // Real (Wave B): resolves the oneshot a `permission_gate::RuntimePermissionGate` is awaiting.
     pub async fn cancel_turn(&self, session_id: SessionId) -> Result<(), RuntimeError>;
+    // Real (Wave B): cancels the session's in-flight-turn `CancellationToken`, if any.
     pub async fn set_execution_mode(&self, session_id: SessionId, mode: xlightcli_tools::ExecutionMode) -> Result<(), RuntimeError>;
 }
 
@@ -936,18 +962,57 @@ pub const CORE_COMMANDS: &[commands::core::CoreCommandSpec]; // help, exit, clea
 
 // context.rs
 pub fn estimate_tokens(text: &str) -> u64; // chars/4 heuristic (docs/PLAN.md §9.2 — no tokenizer dep)
+pub fn estimate_message_tokens(message: &Message) -> u64; // [Wave B addition] per-`Message` estimate
 pub struct ContextManager;
 impl ContextManager {
     pub fn new(compaction_threshold: f32) -> Self;
     pub fn from_config(cfg: &xlightcli_config::ContextConfig) -> Self;
+    // [Wave B addition] builds from the full `Config` so rule discovery honors `[rules].sources`;
+    // `new`/`from_config` still work (default rule sources), purely additive.
+    pub fn from_full_config(cfg: &xlightcli_config::Config) -> Self;
+    // [Wave B addition] overrides where rule files are discovered from — `Storage` has no
+    // `get_workspace` accessor yet, so `build_turn_request` defaults to the process cwd; tests
+    // (and a future wave once that accessor exists) can override it explicitly.
+    pub fn with_rule_root(self, root: impl Into<PathBuf>) -> Self;
     pub fn should_compact(&self, used_tokens: u64, context_window: u64) -> bool; // real
+    // real (Wave B): base system prompt + discovered rule files, paged history (most recent 200
+    // messages), tool definitions from `tools`.
     pub async fn build_turn_request(&self, storage: &xlightcli_storage::Storage,
-        tools: &xlightcli_tools::ToolRegistry, session: &Session) -> Result<TurnRequest, RuntimeError>; // stub
+        tools: &xlightcli_tools::ToolRegistry, session: &Session) -> Result<TurnRequest, RuntimeError>;
+    // [Wave B addition] sum of `estimate_tokens`/`estimate_message_tokens` over a `TurnRequest`.
+    pub fn estimate_request_tokens(&self, request: &TurnRequest) -> u64;
+    // [Wave B addition] keeps the most recent 8 messages, folds everything older into one
+    // deterministic placeholder `Message` (not a real LLM summary, not persisted — see CODEBASE.md
+    // §2's `runtime` row for the scope decision).
+    pub fn compact_messages(&self, messages: Vec<Message>, session_id: SessionId) -> Vec<Message>;
 }
 
-// agent.rs
+// agent.rs — [Wave B signature change, internal-only]: `run_turn` used to take
+// `(&RuntimeDeps, &Session)`, which had no way to reach the UI channel / pending-permission map /
+// per-turn CancellationToken (all live on RuntimeHandle's private state). It now takes a
+// `TurnContext` bundle. Only `RuntimeHandle::submit_user_input`/`crate::exec::run_exec` (both
+// inside this crate) call it, so this is invisible to `tui`/`app`.
+pub struct TurnContext<'a> { pub deps: &'a RuntimeDeps, pub session: &'a Session, pub agent_id: AgentId,
+    pub context: &'a ContextManager, pub permission_engine: xlightcli_tools::PermissionEngine,
+    pub ui_tx: mpsc::Sender<UiEvent>, pub pending_permissions: PendingPermissions,
+    pub cancel: CancellationToken, pub max_steps: u32,
+    pub headless_ask_policy: Option<xlightcli_tools::AskPolicy> } // None = interactive (ask via UiEvent), Some(policy) = headless
+pub struct TurnSummary { pub response_text: String, pub usage: Usage, pub stop: StopReason }
 pub struct AgentLoop;
-impl AgentLoop { pub async fn run_turn(deps: &RuntimeDeps, session: &Session) -> Result<(), RuntimeError>; } // stub
+impl AgentLoop {
+    pub async fn run_turn(ctx: TurnContext<'_>, user_text: String) -> Result<TurnSummary, RuntimeError>;
+    // Real multi-step loop (docs/PLAN.md §9.1): builds the request via ContextManager, streams
+    // through the transport, on `StopReason::ToolUse` runs each tool call through
+    // `permission_gate::RuntimePermissionGate` (rules/mode + Plan/AcceptEdits execution-mode
+    // overrides) and loops again; persists every message/tool-call/usage row. A provider failure
+    // after some output was already produced returns `Ok(TurnSummary)` with `stop:
+    // StopReason::Other("provider_error_after_partial_output: ...")` instead of `Err` (D-026 exit
+    // code 3 vs 1 — see exec.rs's module doc for the app-side follow-up this needs).
+}
+
+// permission_gate.rs (private module; `AgentLoop`/`RuntimeHandle` are the only callers)
+pub type PendingPermissions = Arc<tokio::sync::Mutex<HashMap<ToolCallId, tokio::sync::oneshot::Sender<PermissionResponse>>>>;
+pub struct RuntimePermissionGate; // impl xlightcli_tools::PermissionGate
 
 // exec.rs — D-026 headless contract
 pub enum ExecOutputFormat { Text, Json, StreamJson }               // impl Default = Text
@@ -961,11 +1026,24 @@ pub struct ExecUsage { pub input_tokens: u64, pub output_tokens: u64, pub thinki
 pub struct ExecOutput { pub conversation_id: SessionId, pub status: String, pub response: String, pub usage: ExecUsage }
 pub enum ExecExitCode { Ok = 0, Error = 1, InvalidInput = 2, PartialError = 3 }
 impl ExecExitCode { pub fn code(self) -> i32; }
-pub async fn run_exec(handle: &RuntimeHandle, options: ExecOptions) -> Result<ExecOutput, RuntimeError>; // stub
+pub async fn run_exec(handle: &RuntimeHandle, options: ExecOptions) -> Result<ExecOutput, RuntimeError>;
+// Real (Wave B): resolves the session (--resume / --continue / new from --provider/--transport/
+// --model + Config defaults), applies --mode, drives one turn headless (`--dangerously-skip-
+// permissions` picks AutoAllow vs. AutoDeny for an `Ask` decision — there's no UI to prompt),
+// enforces --print-timeout. See exec.rs's module doc for two flagged app-side follow-ups:
+// (1) `app::cmd::exec::dispatch` always maps `Err` -> exit 1 / `Ok` -> exit 0 today; distinguishing
+// exit 2 (RuntimeError::InvalidRequest) and exit 3 (ExecOutput.status != "ok" with a non-empty
+// response) needs an app-side change. (2) real `stream-json` incremental rendering needs app to
+// concurrently `handle.subscribe()` while `run_exec` runs, not just render the final ExecOutput.
+// (3) --dangerously-skip-permissions does not check workspace trust yet (no TrustStore handle on
+// RuntimeDeps in Wave B) — flag before treating it as multi-tenant-safe.
 
 pub enum RuntimeError { UnknownSession(SessionId), NoActiveTurn(SessionId), UnknownCommand(String),
     NoPendingPermission(ToolCallId), AlreadySubscribed, Storage(#[from] StorageError),
-    Tool(#[from] ToolError), Provider(#[from] ProviderError), NotImplemented(&'static str) }
+    Tool(#[from] ToolError), Provider(#[from] ProviderError),
+    Auth(#[from] xlightcli_auth::AuthError),          // [Wave B addition]
+    InvalidRequest(String),                            // [Wave B addition]
+    NotImplemented(&'static str) }
 
 // testing.rs — feature "testing" (pulls in xlightcli-provider/testing, xlightcli-auth/testing)
 pub fn mock_deps(storage: xlightcli_storage::Storage) -> RuntimeDeps; // empty ProviderRegistry, AuthBroker::new(), with_builtins() tools
@@ -981,13 +1059,20 @@ pub use xlightcli_tools::{ArtifactRef, ExecutionMode, PermissionMode, Permission
 
 ---
 
-## 11. `xlightcli-tui` (Phase 1 Wave A)
+## 11. `xlightcli-tui` (Phase 1 Wave B)
+
+Every item below is real (Wave A's "no rendering yet"/stub notes no longer apply). Signature
+changes vs. the Wave A shape are additive except where noted; `App`/`Action`/`input::action_for`
+gained fields/parameters that only `tui`'s own `run` (its sole caller) uses.
 
 ```rust
 pub struct TuiOptions { pub initial_session: Option<SessionId> } // impl Default
 pub async fn run(handle: xlightcli_runtime::RuntimeHandle, opts: TuiOptions) -> Result<(), TuiError>;
-// Real terminal lifecycle: raw mode + alternate screen, tokio::select! over UiEvents + crossterm
-// key events, restores the terminal on the way out. Never calls Terminal::draw (no rendering yet).
+// Real terminal lifecycle: installs a panic hook that restores the terminal before the default
+// panic message prints, raw mode + alternate screen, tokio::select! over UiEvents + crossterm key
+// events (Event::Resize marks the frame dirty). Renders on a ~20 FPS ticking interval whenever
+// App::dirty is set (never once per delta, PATTERNS.md §3) via Terminal::draw(|f| app.draw(f)).
+// Restores the terminal on the way out regardless of how the loop exited.
 
 pub enum TuiError { Io(#[from] std::io::Error), Runtime(#[from] xlightcli_runtime::RuntimeError),
                      NotImplemented(&'static str) }
@@ -996,42 +1081,87 @@ pub enum TuiError { Io(#[from] std::io::Error), Runtime(#[from] xlightcli_runtim
 pub struct App { pub handle: RuntimeHandle, pub keymap: Keymap, pub theme: Theme,
                   pub transcript: view::TranscriptView, pub prompt: view::PromptView,
                   pub status_line: Option<view::StatusLineView>, pub overlay: Overlay,
-                  pub execution_mode: xlightcli_runtime::ExecutionMode, pub should_quit: bool }
+                  pub execution_mode: xlightcli_runtime::ExecutionMode, pub should_quit: bool,
+                  // [Wave B additions]
+                  pub session_id: Option<SessionId>,   // set from UiEvent::SessionChanged/TurnStarted
+                  pub quit_confirm_pending: bool,       // Ctrl+C-twice-to-quit state
+                  pub dirty: bool }                     // drives crate::run's ticking redraw
 impl App {
-    pub fn new(handle: RuntimeHandle) -> Self;
-    pub fn apply_ui_event(&mut self, event: xlightcli_runtime::UiEvent); // partial (mode changes, text deltas); Wave B fills in every arm
+    pub fn new(handle: RuntimeHandle) -> Self;          // status_line starts Some(default), not None
+    pub fn apply_ui_event(&mut self, event: xlightcli_runtime::UiEvent); // every arm now real
+    // [Wave B additions]
+    pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Intent;
+    // Pure state transition (no .await anywhere in its call tree): mutates transcript/prompt/
+    // overlay/execution_mode and returns the one RuntimeHandle call (if any) crate::run's event
+    // loop should make. This is what makes key handling unit-testable without a TTY or Tokio.
+    pub fn open_diff(&mut self, view: view::DiffView); // used by `/diff`'s CommandOutcome handling
+    pub fn draw(&self, frame: &mut ratatui::Frame<'_>); // status line + transcript + prompt + overlay popup
 }
 pub enum Overlay { None, CommandPalette(view::CommandPaletteView), Permission(view::PermissionDialogView), Diff(view::DiffView) }
 
+// [Wave B addition] what `App::on_key` asks `crate::run`'s event loop to do with the RuntimeHandle
+// (kept out of App so on_key stays synchronous/pure):
+pub enum Intent { None, Quit, Submit(String), RunCommand(String),
+    RespondPermission(ToolCallId, xlightcli_runtime::PermissionResponse), CancelTurn,
+    SetExecutionMode(xlightcli_runtime::ExecutionMode) }
+
 // keymap.rs
-pub enum Action { Submit, Quit, CycleExecutionMode, OpenCommandPalette, OpenAgentTree, ScrollTranscriptUp, ScrollTranscriptDown }
-pub struct Keymap; // impl Default (shift+tab -> CycleExecutionMode, ctrl+c -> Quit, ...)
+pub enum Action { Submit, Quit, Cancel /* [Wave B addition]: Esc */, CycleExecutionMode,
+                   OpenCommandPalette, OpenAgentTree, ScrollTranscriptUp, ScrollTranscriptDown }
+pub struct Keymap; // impl Default (shift+tab -> CycleExecutionMode, ctrl+c -> Quit, esc -> Cancel,
+                    // pageup/pagedown -> Scroll* [Wave B: moved off plain Up/Down, now free for
+                    // PromptView's history navigation], ...)
 impl Keymap {
     pub fn apply_overrides(&mut self, overrides: &BTreeMap<String, String>); // from xlightcli_config::UiConfig::keybind
     pub fn chord_for(&self, action: Action) -> Option<&str>;
+    pub fn action_for_chord(&self, chord: &str) -> Option<Action>; // [Wave B addition] reverse lookup
 }
 
 // theme.rs
 pub enum ThemeRole { Foreground, Background, Accent, Muted, Success, Warning, Danger }
 pub struct Theme { pub name: String } // impl Default = "default"
+impl Theme { pub fn style(&self, role: ThemeRole) -> ratatui::style::Style; } // [Wave B addition]
 
-// view/ — state only, no rendering (Wave B fills in ratatui draw calls)
+// view/ — state + real ratatui rendering (each has a `render(&self, frame, area, theme[, ..])` method)
 pub struct TranscriptView { pub lines: Vec<TranscriptLine>, pub scroll_offset: u16 }
-pub struct PromptView { pub buffer: String, pub cursor: usize }
+pub enum TranscriptRole { User, Assistant, Reasoning, ToolCall, Notice, Error } // [Wave B addition]
+pub struct TranscriptLine { pub role: TranscriptRole, pub text: String, pub agent_id: Option<AgentId>,
+    pub tool_call_id: Option<ToolCallId>, pub artifact_path: Option<String>, pub finished: bool,
+    pub collapsed: bool } // [Wave B: was just `{ text: String }`]
+impl TranscriptView {
+    // push_user/push_notice/push_notice_leveled/push_error: one-shot lines.
+    // push_assistant_delta/push_reasoning_delta: coalesce into the last matching line per agent_id.
+    // start_tool_call/finish_tool_call: a tool-call card, filled in when it finishes.
+    // toggle_last_reasoning: collapse/expand the most recent reasoning block (Ctrl+R).
+    // scroll_up/scroll_down.
+}
+pub struct PromptView { pub buffer: String, pub cursor: usize,
+    pub history: Vec<String> } // [Wave B addition: multiline editing + submission history]
+impl PromptView { pub fn height(&self) -> u16; pub fn take(&mut self) -> String;
+    pub fn on_key(&mut self, key: &crossterm::event::KeyEvent) -> bool; }
 pub struct StatusLineView { pub workspace_label: String, pub provider: ProviderId, pub transport: TransportId,
     pub model: ModelId, pub agents_total: u32, pub agents_running: u32,
-    pub context_used_percent: u8, pub permission_mode: xlightcli_runtime::PermissionMode }
-pub struct PermissionDialogView { pub tool_call_id: ToolCallId, pub request: xlightcli_runtime::PermissionRequest }
+    pub context_used_percent: u8, pub permission_mode: xlightcli_runtime::PermissionMode,
+    pub execution_mode: xlightcli_runtime::ExecutionMode,       // [Wave B addition]
+    pub last_usage: Option<Usage>, pub last_rate_limit: Option<RateLimitInfo> } // [Wave B addition]
+pub struct PermissionDialogView { pub tool_call_id: ToolCallId, pub request: xlightcli_runtime::PermissionRequest,
+    pub selected: usize } // [Wave B addition: 3-way Allow once / Always allow / Deny selection]
+pub enum PermissionChoice { AllowOnce, AlwaysAllow, Deny } // [Wave B addition]
 pub struct DiffView { pub hunks: Vec<DiffHunk>, pub selected: usize }
-pub struct CommandPaletteView { pub query: String, pub selected: usize }
+pub fn parse_unified_diff(text: &str) -> Vec<DiffHunk>; // [Wave B addition] splits `git diff`/`--- a/<path>` text per file
+pub struct CommandPaletteView { pub query: String, pub selected: usize,
+    pub matches: Vec<usize> } // [Wave B addition: indices into the caller's (alias, summary) entries]
 
 // input.rs
 pub fn quit_requested(key: &crossterm::event::KeyEvent) -> bool; // hardcoded Ctrl+C, keymap-independent
-pub fn action_for(key: &crossterm::event::KeyEvent) -> Option<Action>; // stub, always None today
+pub fn chord_of(key: &crossterm::event::KeyEvent) -> String; // [Wave B addition] normalizes a key into "ctrl+c"/"shift+tab"/... form
+pub fn action_for(key: &crossterm::event::KeyEvent, keymap: &Keymap) -> Option<Action>; // [Wave B: now real, takes a Keymap]
 ```
 
-`run`'s event loop can't be meaningfully unit-tested (needs a real TTY); `App`/`view::*`/`Keymap`
-are tested directly instead.
+`run`'s event loop still can't be meaningfully unit-tested end to end (needs a real TTY), but
+`App::on_key`/`apply_ui_event`/`draw` are — `draw` via `ratatui::backend::TestBackend` + `insta`
+snapshot tests (`tests/snapshots.rs`: empty session, streaming answer, tool-call card, permission
+dialog, diff view, status line per execution mode).
 
 ---
 
@@ -1043,12 +1173,14 @@ Runtime-backed commands use a new, separate context instead:
 
 ```rust
 // wiring.rs
+pub enum WiringError { Storage(xlightcli_storage::StorageError), Config(xlightcli_config::ConfigError) }
 pub struct RuntimeContext { pub handle: xlightcli_runtime::RuntimeHandle }
-pub async fn build_runtime() -> Result<RuntimeContext, xlightcli_storage::StorageError>;
-    // Reuses build()'s provider/auth wiring; opens Storage at xlightcli_config::paths::database_path();
-    // registers xlightcli_tools::ToolRegistry::with_builtins().
-pub async fn build_runtime_at(db_path: PathBuf) -> Result<RuntimeContext, xlightcli_storage::StorageError>;
-    // Same, but an explicit db path — the seam integration tests use.
+pub async fn build_runtime() -> Result<RuntimeContext, WiringError>;
+    // Resolves layered global/project config via ConfigLoader + TrustStore; opens Storage at
+    // xlightcli_config::paths::database_path(); registers xlightcli_tools::ToolRegistry::with_builtins().
+pub async fn build_runtime_at(db_path: PathBuf) -> Result<RuntimeContext, WiringError>;
+    // Same, but an explicit db path with isolated config defaults — the seam integration tests use.
+pub async fn build_runtime_with_paths(db_path: PathBuf, global_config_path: PathBuf, trust_path: PathBuf, repo_root: Option<&Path>) -> Result<RuntimeContext, WiringError>;
 
 // cli.rs — new Command variants (existing Dev/Auth/Provider unchanged)
 pub enum Command {
@@ -1063,9 +1195,9 @@ pub struct ExecArgs { pub print: Option<String>, pub prompt: Option<String>,
     pub add_dir: Vec<PathBuf>, pub print_timeout: Option<u64> }
 pub enum ExecOutputFormatArg { Text, Json, StreamJson } // impl From<Self> for xlightcli_runtime::ExecOutputFormat
 
-// cmd::exec — real arg validation/wiring; the turn itself is xlightcli_runtime::run_exec (a Wave B stub)
+// cmd::exec — real turn execution via xlightcli_runtime::run_exec; D-026 exit codes 0/1/2/3; incremental stream-json
 pub async fn dispatch(args: &ExecArgs) -> Result<(), CliError>;
-// cmd::init — stub, reports a clear error (never silently does nothing)
+// cmd::init — minimal real behavior: writes project config skeleton and AGENTS.md stub non-destructively
 pub async fn dispatch() -> Result<(), CliError>;
 ```
 

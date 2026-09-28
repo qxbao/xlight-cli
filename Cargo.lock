@@ -3847,8 +3847,13 @@ dependencies = [
 name = "xlightcli-runtime"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "futures",
+ "globset",
+ "insta",
  "pretty_assertions",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",
@@ -3857,6 +3862,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "xlightcli-auth",
  "xlightcli-config",
  "xlightcli-mcp",
@@ -3916,6 +3922,7 @@ name = "xlightcli-tui"
 version = "0.0.1"
 dependencies = [
  "crossterm",
+ "insta",
  "pretty_assertions",
  "ratatui",
  "tempfile",

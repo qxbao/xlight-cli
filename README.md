@@ -48,7 +48,7 @@ xlightcli is not published to crates.io yet. Build it from source (requires Rust
 via [rustup](https://rustup.rs); the repository pins the stable toolchain in `rust-toolchain.toml`):
 
 ```bash
-git clone <this-repository-url> xlight-cli
+git clone https://github.com/qxbao/xlight-cli.git xlight-cli
 cd xlight-cli
 cargo install --locked --path crates/app
 xlightcli --version

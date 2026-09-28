@@ -81,16 +81,24 @@ fn header_value(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(str::to_string)
 }
 
-/// **U**: Phase 0 static list — the `chatgpt` backend's model-catalog endpoint is not
-/// independently verified (docs/providers/codex.md), so `list_models` cannot call it yet.
+/// Suggestions for the picker, not an entitlement list: the `chatgpt` model-catalog endpoint has
+/// not been verified. `gpt-5.6-terra` was live-probed (docs/providers/codex.md); the GPT-6 IDs
+/// are user-requested examples whose availability is checked only when a turn is sent.
 fn static_models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
-        id: ModelId::new("gpt-5-codex"),
-        display_name: "GPT-5 Codex".to_string(),
+    [
+        ("gpt-6-sol", "GPT-6 Sol (suggested)"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra (live-probed)"),
+        ("gpt-6-luna", "GPT-6 Luna (suggested)"),
+    ]
+    .into_iter()
+    .map(|(id, name)| ModelInfo {
+        id: ModelId::new(id),
+        display_name: name.to_string(),
         context_window: None,
         max_output_tokens: None,
         supports_reasoning: true,
-    }]
+    })
+    .collect()
 }
 
 #[async_trait]
@@ -198,5 +206,23 @@ impl TransportAdapter for ChatgptTransport {
             }
             yield translator.finish()?;
         }))
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn picker_suggests_current_ids_without_the_old_codex_default() {
+        let ids: Vec<_> = static_models().into_iter().map(|model| model.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                ModelId::new("gpt-6-sol"),
+                ModelId::new("gpt-5.6-terra"),
+                ModelId::new("gpt-6-luna"),
+            ]
+        );
     }
 }

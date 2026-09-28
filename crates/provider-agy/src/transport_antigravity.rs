@@ -220,7 +220,7 @@ impl TransportAdapter for AntigravityTransport {
         let provider = ProviderId::new("agy");
         let transport = self.id();
         let flat_body = wire::build_generate_content_body(&provider, &transport, &req)?;
-        let session_id = wire::antigravity_session_id(&req.messages);
+        let session_id = wire::antigravity_session_id(&req);
         let request_id = wire::new_request_id();
         let envelope = wire::build_antigravity_envelope(
             req.model.as_str(),

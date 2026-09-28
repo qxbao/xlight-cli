@@ -45,3 +45,4 @@ insta = { workspace = true }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
 wiremock = { workspace = true }
+xlightcli-tools = { workspace = true }

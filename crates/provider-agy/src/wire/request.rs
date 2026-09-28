@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "antigravity-subscription")]
 use xlightcli_protocol::Message;
 use xlightcli_protocol::{
-    ContentBlock, ImageSource, OpaqueBlob, ProviderError, ProviderId, ReasoningEffort, Role,
-    ToolCallId, ToolResultPart, TransportId, TurnRequest,
+    ContentBlock, ImageSource, OpaqueBlob, ProtocolVersion, ProviderError, ProviderId,
+    ReasoningEffort, Role, ToolCallId, ToolResultPart, TransportId, TurnRequest,
 };
 
 #[cfg(feature = "antigravity-subscription")]
@@ -31,8 +31,9 @@ use crate::consts::antigravity;
 /// Gemini function-declaration `parameters` accept a documented JSON-Schema **subset**
 /// (type/description/nullable/format/properties/items/required/enum) and reject unknown keywords
 /// (`additionalProperties`, `$schema`, …) with a 400. Simplified port of OpenCodex's
-/// `sanitizeGeminiToolParameters` — Phase 0 tools (`crates/tools`) don't yet emit `anyOf`/`$ref`,
-/// so those aren't inlined here; extend this if a real tool schema needs them.
+/// `sanitizeGeminiToolParameters`. `schemars` represents nullable fields as a type array such as
+/// `["integer", "null"]`; Gemini's protobuf JSON accepts one scalar `type`, with nullable as a
+/// separate boolean, so this sanitizer normalizes that representation as well.
 const ALLOWED_SCHEMA_KEYS: &[&str] = &[
     "type",
     "description",
@@ -69,11 +70,24 @@ fn prune_schema(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();
+            let mut inferred_nullable = false;
             for (key, val) in map {
                 if !ALLOWED_SCHEMA_KEYS.contains(&key.as_str()) {
                     continue;
                 }
                 let pruned = match key.as_str() {
+                    "type" => match val {
+                        Value::String(_) => val.clone(),
+                        Value::Array(types) => {
+                            inferred_nullable = types.iter().any(|kind| kind == "null");
+                            types
+                                .iter()
+                                .find(|kind| kind.as_str().is_some_and(|kind| kind != "null"))
+                                .cloned()
+                                .unwrap_or(Value::String("string".to_string()))
+                        }
+                        _ => continue,
+                    },
                     "properties" => match val {
                         Value::Object(props) => Value::Object(
                             props
@@ -87,6 +101,9 @@ fn prune_schema(value: &Value) -> Value {
                     _ => val.clone(),
                 };
                 out.insert(key.clone(), pruned);
+            }
+            if inferred_nullable && !out.contains_key("nullable") {
+                out.insert("nullable".to_string(), Value::Bool(true));
             }
             Value::Object(out)
         }
@@ -125,20 +142,29 @@ fn first_user_text(messages: &[Message]) -> Option<String> {
     None
 }
 
-/// Deterministic Cloud Code Assist session id derived from the first user message's text
-/// (`sha256(text)` → big-endian `u64` masked with `0x7FFF_FFFF_FFFF_FFFF`, prefixed with `-`),
-/// mirroring OpenCodex's `antigravitySessionId`/CLIProxyAPI `generateStableSessionID`. It must stay
-/// **stable across turns of the same conversation** (the CCA session id keys reasoning-signature
-/// replay) — falls back to a random id when no user text exists yet (first turn with no text, or a
-/// document-only opening turn; see the ported source for the fuller anchor logic we do not port).
+/// Deterministic Cloud Code Assist session id derived from a stable seed (`sha256(seed)` →
+/// big-endian `u64` masked with `0x7FFF_FFFF_FFFF_FFFF`, prefixed with `-`). A modern runtime
+/// sends its persisted session UUID as that seed; the legacy first-user-text fallback is retained
+/// for standalone `TurnRequest` callers. CCA expects the numeric-looking value, not a UUID.
 #[cfg(feature = "antigravity-subscription")]
-pub(crate) fn antigravity_session_id(messages: &[Message]) -> String {
-    let seed = first_user_text(messages).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+fn antigravity_session_id_from_seed(seed: &str) -> String {
     let digest = Sha256::digest(seed.as_bytes());
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&digest[..8]);
     let masked = u64::from_be_bytes(buf) & 0x7fff_ffff_ffff_ffff;
     format!("-{masked}")
+}
+
+#[cfg(feature = "antigravity-subscription")]
+pub(crate) fn antigravity_session_id(req: &TurnRequest) -> String {
+    let seed = req
+        .provider_options
+        .get("xlightcli_session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| first_user_text(&req.messages))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    antigravity_session_id_from_seed(&seed)
 }
 
 /// `agent-<uuid>` request id, matching the envelope's `requestId` field.
@@ -235,13 +261,14 @@ pub(crate) fn build_generate_content_body(
                     content,
                     is_error,
                 } => {
-                    let name = call_names.get(call_id).cloned().unwrap_or_else(|| {
-                        tracing::debug!(
-                            call_id = %call_id,
-                            "agy wire: tool result with no matching prior functionCall name in this request"
-                        );
-                        String::new()
-                    });
+                    let name = call_names.get(call_id).cloned().ok_or_else(|| {
+                        ProviderError::ProtocolMismatch {
+                            expected: ProtocolVersion(1),
+                            detail: format!(
+                                "tool result {call_id} has no preceding tool call in conversational order"
+                            ),
+                        }
+                    })?;
                     let mut response_text = String::new();
                     for part in content {
                         match part {
@@ -437,6 +464,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_before_tool_use_is_rejected_locally() {
+        let (provider, transport) = provider_transport();
+        let mut req = TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "read file");
+        req.messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                call_id: ToolCallId::new("call-1"),
+                content: vec![ToolResultPart::Text {
+                    text: "contents".into(),
+                }],
+                is_error: false,
+            }],
+        });
+        assert!(matches!(
+            build_generate_content_body(&provider, &transport, &req),
+            Err(ProviderError::ProtocolMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn reasoning_replays_signature_only_for_matching_provider_and_transport() {
         let (provider, transport) = provider_transport();
         let mut req = TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "hi");
@@ -554,6 +601,50 @@ mod tests {
     }
 
     #[test]
+    fn nullable_schemars_type_is_converted_to_scalar_gemini_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "start_line": {"type": ["integer", "null"], "minimum": 1}
+            }
+        });
+        let sanitized = sanitize_schema(&schema);
+        assert_eq!(sanitized["properties"]["start_line"]["type"], "integer");
+        assert_eq!(sanitized["properties"]["start_line"]["nullable"], true);
+        assert!(
+            sanitized["properties"]["start_line"]
+                .get("minimum")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn every_real_builtin_schema_has_only_scalar_types_after_sanitizing() {
+        fn assert_scalar_types(value: &Value) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(kind) = map.get("type") {
+                        assert!(kind.is_string(), "Gemini type must be a scalar: {kind}");
+                    }
+                    for child in map.values() {
+                        assert_scalar_types(child);
+                    }
+                }
+                Value::Array(items) => {
+                    for child in items {
+                        assert_scalar_types(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for tool in xlightcli_tools::ToolRegistry::with_builtins().definitions() {
+            assert_scalar_types(&sanitize_schema(&tool.input_schema));
+        }
+    }
+
+    #[test]
     fn reasoning_effort_maps_to_thinking_level() {
         let (provider, transport) = provider_transport();
         let mut req = TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "hi");
@@ -576,11 +667,24 @@ mod tests {
 
     #[cfg(feature = "antigravity-subscription")]
     #[test]
-    fn antigravity_session_id_is_stable_for_the_same_first_user_text() {
-        let messages = vec![Message::user_text("hello world")];
-        let a = antigravity_session_id(&messages);
-        let b = antigravity_session_id(&messages);
+    fn antigravity_session_id_uses_the_runtime_session_key() {
+        let mut first = TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "return Hello only");
+        first
+            .provider_options
+            .insert("xlightcli_session_id", json!("xlightcli-session-a"));
+        let mut second =
+            TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "a different first prompt");
+        second
+            .provider_options
+            .insert("xlightcli_session_id", json!("xlightcli-session-a"));
+        let mut other = TurnRequest::simple(ModelId::new("gemini-3.1-pro"), "return Hello only");
+        other
+            .provider_options
+            .insert("xlightcli_session_id", json!("xlightcli-session-b"));
+        let a = antigravity_session_id(&first);
+        let b = antigravity_session_id(&second);
         assert_eq!(a, b);
+        assert_ne!(a, antigravity_session_id(&other));
         assert!(a.starts_with('-'));
     }
 

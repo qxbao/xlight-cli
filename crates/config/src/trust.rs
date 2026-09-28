@@ -31,6 +31,15 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
+    /// Creates an empty in-memory trust set. Intended for isolated test runtimes that never
+    /// persist trust decisions; production wiring should load the configured trust file.
+    pub fn empty(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            trusted: std::sync::Mutex::new(BTreeSet::new()),
+        }
+    }
+
     /// Loads the trust file at `path`, or starts empty if it doesn't exist yet.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         let path = path.into();

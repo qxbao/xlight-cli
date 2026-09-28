@@ -129,16 +129,9 @@ async fn run_streaming(
     handle: &RuntimeHandle,
     options: ExecOptions,
 ) -> Result<ExecOutput, RuntimeError> {
-    let mut ui_events = match handle.subscribe().await {
-        Ok(rx) => rx,
-        Err(err) => {
-            // Already subscribed (shouldn't happen: `exec` is a fresh `RuntimeHandle` per
-            // process) — fall back to a non-streaming run rather than failing the whole command
-            // over a UI-only nicety.
-            tracing::warn!(%err, "stream-json: could not subscribe to UiEvents, falling back to a single final line");
-            return xlightcli_runtime::run_exec(handle, options).await;
-        }
-    };
+    // A requested stream must stay a stream. A second subscriber is a real setup error;
+    // returning one final JSON object here would misrepresent the requested output format.
+    let mut ui_events = handle.subscribe().await?;
 
     let exec_fut = xlightcli_runtime::run_exec(handle, options);
     tokio::pin!(exec_fut);

@@ -18,6 +18,7 @@ use crate::error::StorageError;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/0001_accounts.sql")),
     (2, include_str!("migrations/0002_sessions.sql")),
+    (3, include_str!("migrations/0003_permission_grants.sql")),
 ];
 
 /// Opens (creating if needed) the sqlite database at `path`, enables WAL, and applies any

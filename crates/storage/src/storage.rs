@@ -173,6 +173,81 @@ impl Storage {
             .await
     }
 
+    /// Returns the persisted root for a session's workspace, including after process restart.
+    pub async fn get_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<crate::records::WorkspaceRecord>, StorageError> {
+        self.call(|reply| StorageCmd::GetWorkspace {
+            workspace_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn save_permission_grant(
+        &self,
+        workspace_id: WorkspaceId,
+        action: String,
+        target: String,
+    ) -> Result<(), StorageError> {
+        self.call(|reply| StorageCmd::SavePermissionGrant {
+            workspace_id,
+            action,
+            target,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn list_permission_grants(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        self.call(|reply| StorageCmd::ListPermissionGrants {
+            workspace_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn save_summary(
+        &self,
+        session_id: SessionId,
+        agent_id: AgentId,
+        covers_until_seq: i64,
+        text: String,
+    ) -> Result<(), StorageError> {
+        self.call(|reply| StorageCmd::SaveSummary {
+            session_id,
+            agent_id,
+            covers_until_seq,
+            text,
+            reply,
+        })
+        .await
+    }
+
+    /// Latest model-produced compacted context and the time it was written.
+    pub async fn latest_summary(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<(String, time::OffsetDateTime)>, StorageError> {
+        self.call(|reply| StorageCmd::LatestSummary { session_id, reply })
+            .await
+    }
+
+    pub async fn latest_event_seq(&self, session_id: SessionId) -> Result<i64, StorageError> {
+        self.with_reader(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?1",
+                [session_id.as_uuid().to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
     pub async fn update_session_status(
         &self,
         session_id: SessionId,
@@ -392,6 +467,31 @@ mod tests {
         let listed = storage.list_sessions(Some(workspace)).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, session);
+    }
+
+    #[tokio::test]
+    async fn exact_permission_grant_survives_reopen_and_workspace_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("storage.db");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = Storage::open(&db).await.unwrap();
+        let workspace = storage.create_workspace(root.clone(), None).await.unwrap();
+        storage
+            .save_permission_grant(workspace, "command".to_string(), "cargo test".to_string())
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&db).await.unwrap();
+        assert_eq!(
+            reopened.create_workspace(root, None).await.unwrap(),
+            workspace
+        );
+        assert_eq!(
+            reopened.list_permission_grants(workspace).await.unwrap(),
+            vec![("command".to_string(), "cargo test".to_string())]
+        );
     }
 
     #[tokio::test]

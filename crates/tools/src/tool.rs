@@ -197,6 +197,7 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     pub session_id: xlightcli_protocol::SessionId,
     pub call_id: xlightcli_protocol::ToolCallId,
+    pub shell_timeout_secs: u64,
     artifacts_dir: PathBuf,
     spool_limits: SpoolLimits,
 }
@@ -236,9 +237,17 @@ impl ToolContext {
             cancel,
             session_id,
             call_id,
+            shell_timeout_secs: xlightcli_config::ToolsConfig::default().shell_timeout_secs,
             artifacts_dir: spool.artifacts_dir,
             spool_limits: spool.limits,
         }
+    }
+
+    /// Applies the resolved default without changing the public constructor used by built-in
+    /// tool tests. A per-call `timeout_secs` argument still takes precedence.
+    pub fn with_shell_timeout(mut self, seconds: u64) -> Self {
+        self.shell_timeout_secs = seconds;
+        self
     }
 
     /// Convenience wrapper: `ctx.permissions.check(action)`.

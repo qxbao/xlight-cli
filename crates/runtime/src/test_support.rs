@@ -15,8 +15,8 @@
 //! `xlightcli_provider::TransportAdapter` implementation instead — no new dependency, still no
 //! network, still deterministic.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -162,6 +162,7 @@ pub struct TestTransport {
     /// of racing a same-tick stream.
     delay: Duration,
     call_count: AtomicUsize,
+    requests: Arc<Mutex<Vec<TurnRequest>>>,
 }
 
 impl TestTransport {
@@ -171,6 +172,7 @@ impl TestTransport {
             scripts,
             delay: Duration::ZERO,
             call_count: AtomicUsize::new(0),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -181,6 +183,11 @@ impl TestTransport {
 
     pub fn with_context_window(mut self, window: u32) -> Self {
         self.capabilities.context_window = Some(window);
+        self
+    }
+
+    pub fn with_request_capture(mut self, requests: Arc<Mutex<Vec<TurnRequest>>>) -> Self {
+        self.requests = requests;
         self
     }
 }
@@ -222,10 +229,14 @@ impl TransportAdapter for TestTransport {
 
     async fn stream(
         &self,
-        _req: TurnRequest,
+        req: TurnRequest,
         _cred: CredentialHandle,
         _cancel: CancellationToken,
     ) -> Result<EventStream, ProviderError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(req);
         let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
         let script = self
             .scripts
@@ -279,6 +290,7 @@ impl Provider for TestProvider {
 /// store (kept alive for the harness's lifetime — dropping it deletes the directory).
 pub struct TestHarness {
     pub handle: RuntimeHandle,
+    pub requests: Arc<Mutex<Vec<TurnRequest>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -300,7 +312,10 @@ pub async fn build_harness(
         .await
         .expect("open storage");
 
-    let mut transport = TestTransport::new(scripts).with_delay(delay);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut transport = TestTransport::new(scripts)
+        .with_delay(delay)
+        .with_request_capture(Arc::clone(&requests));
     if let Some(window) = context_window {
         transport = transport.with_context_window(window);
     }
@@ -337,9 +352,18 @@ pub async fn build_harness(
         tools: Arc::new(tools),
         storage,
         config,
+        workspace_trust: Arc::new(
+            xlightcli_config::TrustStore::load(dir.path().join("trust.toml"))
+                .expect("test trust store"),
+        ),
+        allow_dangerous_permissions: false,
     };
     let handle = RuntimeHandle::new(deps, RuntimeConfig::default());
-    TestHarness { handle, _dir: dir }
+    TestHarness {
+        handle,
+        requests,
+        _dir: dir,
+    }
 }
 
 /// A test-only tool that always checks `PermissionAction::WriteFile("out.txt")` before "writing"

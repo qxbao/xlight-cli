@@ -260,7 +260,7 @@ pub async fn build_runtime_with_paths(
     if let Some(root) = repo_root {
         loader = loader.with_project_dir(xlightcli_config::paths::project_config_dir(root));
     }
-    let trust_store = TrustStore::load(&trust_path)?;
+    let trust_store = Arc::new(TrustStore::load(&trust_path)?);
     let loaded = loader.load(
         &trust_store,
         repo_root,
@@ -317,6 +317,9 @@ pub async fn build_runtime_with_paths(
         tools: Arc::new(xlightcli_tools::ToolRegistry::with_builtins()),
         storage,
         config,
+        workspace_trust: trust_store,
+        allow_dangerous_permissions: std::env::var("XLIGHTCLI_ALLOW_DANGEROUS_SKIP_PERMISSIONS")
+            .is_ok_and(|value| value == "1"),
     };
     let handle =
         xlightcli_runtime::RuntimeHandle::new(deps, xlightcli_runtime::RuntimeConfig::default());

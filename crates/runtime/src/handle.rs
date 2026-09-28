@@ -12,10 +12,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use xlightcli_protocol::{
-    AgentId, ModelId, ProviderId, SessionId, StopReason, ToolCallId, TransportId, Usage,
+    AgentId, ModelId, ModelInfo, ProviderId, SessionId, Stability, StopReason, ToolCallId,
+    TransportId, Usage,
 };
 
 use crate::agent::{AgentLoop, TurnContext};
@@ -24,6 +27,51 @@ use crate::context::ContextManager;
 use crate::error::RuntimeError;
 use crate::permission_gate::PendingPermissions;
 use crate::session::Session;
+
+#[derive(Debug)]
+struct SessionLoginUi {
+    ui_tx: mpsc::Sender<UiEvent>,
+}
+
+#[async_trait]
+impl xlightcli_auth::LoginUi for SessionLoginUi {
+    async fn show_browser_url(&self, url: &str) {
+        let _ = self
+            .ui_tx
+            .send(UiEvent::Notice {
+                level: NoticeLevel::Info,
+                message: format!("Open this URL to log in: {url}"),
+            })
+            .await;
+    }
+
+    async fn show_device_code(&self, verification_uri: &str, user_code: &str) {
+        let _ = self
+            .ui_tx
+            .send(UiEvent::Notice {
+                level: NoticeLevel::Info,
+                message: format!("Go to {verification_uri} and enter code {user_code}"),
+            })
+            .await;
+    }
+
+    async fn prompt_api_key(
+        &self,
+        provider: &ProviderId,
+    ) -> Result<secrecy::SecretString, xlightcli_auth::AuthError> {
+        let name = format!(
+            "XLIGHTCLI_API_KEY_{}",
+            provider.as_str().to_uppercase().replace(['-', '.'], "_")
+        );
+        let value = std::env::var(&name).map_err(|_| xlightcli_auth::AuthError::OAuth(format!(
+            "set {name} before using /login for an API-key transport, or run `xlightcli auth login {provider}` outside the TUI"
+        )))?;
+        if value.is_empty() {
+            return Err(xlightcli_auth::AuthError::OAuth(format!("{name} is empty")));
+        }
+        Ok(secrecy::SecretString::from(value))
+    }
+}
 
 /// Process-wide shared resources a `RuntimeHandle` operates over (CODEBASE.md §5), `Arc`'d by
 /// `app::wiring` and never cloned per agent.
@@ -38,6 +86,9 @@ pub struct RuntimeDeps {
     pub tools: Arc<xlightcli_tools::ToolRegistry>,
     pub storage: xlightcli_storage::Storage,
     pub config: xlightcli_config::Config,
+    pub workspace_trust: Arc<xlightcli_config::TrustStore>,
+    /// Process-wide opt-in for `--dangerously-skip-permissions`; project config cannot set it.
+    pub allow_dangerous_permissions: bool,
 }
 
 impl std::fmt::Debug for RuntimeDeps {
@@ -149,6 +200,7 @@ pub enum UiEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionResponse {
     Allow,
+    AllowAlways,
     Deny,
 }
 
@@ -222,6 +274,120 @@ impl RuntimeHandle {
 
     pub fn commands(&self) -> &CommandRegistry {
         &self.state.commands
+    }
+
+    /// Provider choices for a new interactive session. Only canonical ids and display labels
+    /// cross the frontend boundary; concrete provider types remain in `app`.
+    pub fn session_providers(&self) -> Vec<(ProviderId, String)> {
+        self.state
+            .deps
+            .providers
+            .iter()
+            .map(|provider| (provider.id(), provider.display_name().to_string()))
+            .collect()
+    }
+
+    /// Transport choices for one provider, including experimental transports so their opt-in
+    /// requirement can be shown rather than silently hiding an installed adapter.
+    pub fn session_transports(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<Vec<(TransportId, Stability)>, RuntimeError> {
+        let provider = self.state.deps.providers.get(provider_id).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!("unknown provider {provider_id}"))
+        })?;
+        Ok(provider
+            .transports()
+            .iter()
+            .map(|transport| (transport.id(), transport.stability()))
+            .collect())
+    }
+
+    /// Model suggestions for a transport. An empty catalog is valid: the TUI still accepts an
+    /// explicitly typed model ID when discovery or credentials are unavailable.
+    pub async fn session_models(
+        &self,
+        provider_id: &ProviderId,
+        transport_id: &TransportId,
+    ) -> Result<Vec<ModelInfo>, RuntimeError> {
+        let provider = self.state.deps.providers.get(provider_id).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!("unknown provider {provider_id}"))
+        })?;
+        let transport = provider.transport(transport_id).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!(
+                "provider {provider_id} has no transport {transport_id}"
+            ))
+        })?;
+        let default_model = self
+            .state
+            .deps
+            .config
+            .provider
+            .get(provider_id.as_str())
+            .and_then(|defaults| defaults.default_model.clone());
+        let mut models = match self
+            .state
+            .deps
+            .auth
+            .credential(provider_id, transport_id)
+            .await
+        {
+            Ok(credential) => match transport.list_models(&credential).await {
+                Ok(models) => models,
+                Err(err) => {
+                    tracing::warn!(%err, "model catalog unavailable; manual model entry remains available");
+                    Vec::new()
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%err, "credential unavailable; manual model entry remains available");
+                Vec::new()
+            }
+        };
+        if let Some(id) = default_model
+            && !models.iter().any(|model| model.id == id)
+        {
+            models.insert(
+                0,
+                ModelInfo {
+                    display_name: format!("{} (configured)", id),
+                    id,
+                    context_window: None,
+                    max_output_tokens: None,
+                    supports_reasoning: false,
+                },
+            );
+        }
+        Ok(models)
+    }
+
+    /// Creates a session rooted at the frontend's current workspace after the picker resolves a
+    /// provider, transport, and model. `Storage` remains the owner of workspace/session records.
+    pub async fn start_session(
+        &self,
+        provider_id: ProviderId,
+        transport_id: TransportId,
+        model_id: ModelId,
+    ) -> Result<SessionId, RuntimeError> {
+        self.session_transports(&provider_id)?
+            .into_iter()
+            .find(|(id, _)| *id == transport_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest(format!(
+                    "provider {provider_id} has no transport {transport_id}"
+                ))
+            })?;
+        if model_id.as_str().is_empty() || model_id.as_str().chars().any(char::is_whitespace) {
+            return Err(RuntimeError::InvalidRequest(
+                "model id must be non-empty and contain no whitespace".to_string(),
+            ));
+        }
+        let root = std::env::current_dir().map_err(|err| {
+            RuntimeError::InvalidRequest(format!("cannot locate current workspace: {err}"))
+        })?;
+        let workspace_id = self.state.deps.storage.create_workspace(root, None).await?;
+        self.create_session(workspace_id, provider_id, transport_id, model_id, None)
+            .await
     }
 
     /// Takes ownership of the single `UiEvent` receiver. Errors on a second call — there is
@@ -437,32 +603,160 @@ impl RuntimeHandle {
                 }
             }
             "core.context" => self.run_context(&session).await,
-            "core.compact" => Ok(CommandOutcome::Unavailable {
-                reason: "persisted compaction summaries aren't implemented yet (`Storage` has \
-                         no `summaries` CRUD API yet) — context is auto-compacted per request \
-                         inside the agent loop when it crosses the threshold, but `/compact` \
-                         can't rewrite history on demand yet (Wave C)"
-                    .to_string(),
-            }),
+            "core.compact" => self.run_compact(&session, rest).await,
             "core.diff" => self.run_diff().await,
             "core.permissions" => Ok(CommandOutcome::Message(self.render_permissions())),
             "core.config" => Ok(CommandOutcome::Message(self.render_config())),
             "core.status" => Ok(CommandOutcome::Message(self.render_status(&session))),
-            "core.login" => Ok(CommandOutcome::Unavailable {
-                reason: "the runtime has no interactive login surface yet; run `xlightcli auth \
-                         login <provider>` instead (INV-10)"
-                    .to_string(),
-            }),
-            "core.logout" => Ok(CommandOutcome::Unavailable {
-                reason: "the runtime has no interactive logout surface yet; run `xlightcli \
-                         auth logout <provider>` instead (INV-10)"
-                    .to_string(),
-            }),
+            "core.login" => self.run_login(&session).await,
+            "core.logout" => self.run_logout(&session).await,
             "core.mode" => self.run_mode(&session, rest).await,
             _ => Ok(CommandOutcome::Unavailable {
                 reason: format!("{} not implemented yet (Wave B)", def.id),
             }),
         }
+    }
+
+    async fn run_login(&self, session: &Session) -> Result<CommandOutcome, RuntimeError> {
+        let provider = self
+            .state
+            .deps
+            .providers
+            .get(&session.provider)
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest(format!("unknown provider {}", session.provider))
+            })?;
+        let transport = provider.transport(&session.transport).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!("unknown transport {}", session.transport))
+        })?;
+        let method = match transport.required_auth() {
+            xlightcli_protocol::AuthKind::Subscription => xlightcli_auth::AuthMethod::BrowserOAuth,
+            xlightcli_protocol::AuthKind::ApiKey => xlightcli_auth::AuthMethod::ApiKey,
+        };
+        let ui = SessionLoginUi {
+            ui_tx: self.state.ui_tx.clone(),
+        };
+        let account = self
+            .state
+            .deps
+            .auth
+            .login(&session.provider, method, &ui)
+            .await?;
+        Ok(CommandOutcome::Message(format!(
+            "Logged in to {}/{} as {}",
+            account.provider, account.transport, account.account_id
+        )))
+    }
+
+    async fn run_logout(&self, session: &Session) -> Result<CommandOutcome, RuntimeError> {
+        let accounts = self
+            .state
+            .deps
+            .auth
+            .accounts(Some(session.provider.clone()))
+            .await?;
+        let account = accounts
+            .into_iter()
+            .find(|account| account.transport == session.transport)
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest(format!(
+                    "no account is logged in for {}/{}",
+                    session.provider, session.transport
+                ))
+            })?;
+        self.state
+            .deps
+            .auth
+            .logout(&session.provider, &session.transport, &account.account_id)
+            .await?;
+        Ok(CommandOutcome::Message(format!(
+            "Logged out of {}/{}",
+            session.provider, session.transport
+        )))
+    }
+
+    async fn run_compact(
+        &self,
+        session: &Session,
+        instructions: &str,
+    ) -> Result<CommandOutcome, RuntimeError> {
+        let provider = self
+            .state
+            .deps
+            .providers
+            .get(&session.provider)
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest(format!("unknown provider {}", session.provider))
+            })?;
+        let transport = provider.transport(&session.transport).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!(
+                "provider {} has no transport {}",
+                session.provider, session.transport
+            ))
+        })?;
+        let credential = self
+            .state
+            .deps
+            .auth
+            .credential(&session.provider, &session.transport)
+            .await?;
+        let agent_id = self.ensure_agent(session).await?;
+        let mut request = self
+            .state
+            .context
+            .build_turn_request(&self.state.deps.storage, &self.state.deps.tools, session)
+            .await?;
+        if request.messages.is_empty() {
+            return Ok(CommandOutcome::Message(
+                "Nothing to compact yet.".to_string(),
+            ));
+        }
+        request.tools.clear();
+        request.system = xlightcli_protocol::SystemPrompt::new(
+            "Summarize this coding conversation for future continuation. Preserve goals, decisions, relevant file paths, pending work, and important tool results. Do not claim unverified work is complete.",
+        );
+        request
+            .messages
+            .push(xlightcli_protocol::Message::user_text(format!(
+                "Produce a concise factual continuation summary. {instructions}"
+            )));
+        let mut stream = transport
+            .stream(request, credential, CancellationToken::new())
+            .await?;
+        let mut summary = None;
+        while let Some(event) = stream.next().await {
+            if let xlightcli_protocol::AgentEvent::Completed { message, stop, .. } = event? {
+                if stop != StopReason::EndTurn {
+                    return Err(RuntimeError::InvalidRequest(format!(
+                        "compaction did not complete: {stop:?}"
+                    )));
+                }
+                let text = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        xlightcli_protocol::ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if !text.trim().is_empty() {
+                    summary = Some(text);
+                }
+                break;
+            }
+        }
+        let text = summary.ok_or_else(|| {
+            RuntimeError::InvalidRequest("compaction produced no summary".to_string())
+        })?;
+        let seq = self.state.deps.storage.latest_event_seq(session.id).await?;
+        self.state
+            .deps
+            .storage
+            .save_summary(session.id, agent_id, seq, text)
+            .await?;
+        Ok(CommandOutcome::Message(
+            "Context summary saved for this session.".to_string(),
+        ))
     }
 
     fn render_help(&self) -> String {
@@ -727,13 +1021,17 @@ mod tests {
     /// Opens (creating if needed) a `RuntimeHandle` backed by real storage at `path` — shared by
     /// [`test_handle`] (fresh tempdir) and the crash-recovery test below (same path, reopened).
     async fn test_handle_at(path: std::path::PathBuf) -> RuntimeHandle {
-        let storage = xlightcli_storage::Storage::open(path).await.unwrap();
+        let storage = xlightcli_storage::Storage::open(&path).await.unwrap();
         let deps = RuntimeDeps {
             providers: Arc::new(xlightcli_provider::ProviderRegistry::new()),
             auth: Arc::new(xlightcli_auth::AuthBroker::new()),
             tools: Arc::new(xlightcli_tools::ToolRegistry::with_builtins()),
             storage,
             config: xlightcli_config::Config::default(),
+            workspace_trust: Arc::new(
+                xlightcli_config::TrustStore::load(path.with_extension("trust.toml")).unwrap(),
+            ),
+            allow_dangerous_permissions: false,
         };
         RuntimeHandle::new(deps, RuntimeConfig::default())
     }
@@ -742,6 +1040,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = test_handle_at(dir.path().join("test.db")).await;
         (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn interactive_picker_can_create_a_persisted_session() {
+        let mut config = xlightcli_config::Config::default();
+        config.provider.insert(
+            crate::test_support::TEST_PROVIDER.to_string(),
+            xlightcli_config::ProviderDefaults {
+                transport: Some(TransportId::new(crate::test_support::TEST_TRANSPORT)),
+                default_model: Some(ModelId::new(crate::test_support::TEST_MODEL)),
+            },
+        );
+        let harness = crate::test_support::build_harness(
+            Vec::new(),
+            std::time::Duration::ZERO,
+            None,
+            xlightcli_tools::ToolRegistry::new(),
+            config,
+        )
+        .await;
+        let handle = &harness.handle;
+        let provider = ProviderId::new(crate::test_support::TEST_PROVIDER);
+        let transport = TransportId::new(crate::test_support::TEST_TRANSPORT);
+        assert_eq!(handle.session_providers().len(), 1);
+        assert_eq!(handle.session_transports(&provider).unwrap().len(), 1);
+        let models = handle.session_models(&provider, &transport).await.unwrap();
+        assert_eq!(models[0].id.as_str(), crate::test_support::TEST_MODEL);
+
+        let session_id = handle
+            .start_session(provider.clone(), transport.clone(), models[0].id.clone())
+            .await
+            .unwrap();
+        let session = handle
+            .deps()
+            .storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.provider, provider);
+        assert_eq!(session.transport, transport);
+        assert_eq!(session.model, models[0].id);
+    }
+
+    #[tokio::test]
+    async fn interactive_picker_accepts_a_custom_model_when_catalog_is_empty() {
+        let harness = crate::test_support::build_harness(
+            Vec::new(),
+            std::time::Duration::ZERO,
+            None,
+            xlightcli_tools::ToolRegistry::new(),
+            xlightcli_config::Config::default(),
+        )
+        .await;
+        let provider = ProviderId::new(crate::test_support::TEST_PROVIDER);
+        let transport = TransportId::new(crate::test_support::TEST_TRANSPORT);
+        assert!(
+            harness
+                .handle
+                .session_models(&provider, &transport)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let model = ModelId::new("gpt-6-luna");
+        let session_id = harness
+            .handle
+            .start_session(provider, transport, model.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.handle.get_session(session_id).await.unwrap().model,
+            model
+        );
     }
 
     #[tokio::test]
@@ -917,28 +1289,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_compact_is_unavailable() {
-        let (handle, _dir) = test_handle().await;
-        let workspace = handle
-            .state
-            .deps
+    async fn run_command_compact_saves_a_model_summary() {
+        let harness = crate::test_support::build_harness(
+            vec![vec![crate::test_support::completed(
+                crate::test_support::text_message("Keep the Rust tests green."),
+                StopReason::EndTurn,
+            )]],
+            std::time::Duration::ZERO,
+            None,
+            xlightcli_tools::ToolRegistry::new(),
+            xlightcli_config::Config::default(),
+        )
+        .await;
+        let handle = &harness.handle;
+        let session_id = crate::test_support::new_session(&harness).await;
+        let session = handle.get_session(session_id).await.unwrap();
+        let agent_id = handle.ensure_agent(&session).await.unwrap();
+        handle
+            .deps()
             .storage
-            .create_workspace(std::path::PathBuf::from("/repo"), None)
-            .await
-            .unwrap();
-        let session_id = handle
-            .create_session(
-                workspace,
-                ProviderId::new("codex"),
-                TransportId::new("chatgpt"),
-                ModelId::new("gpt-5"),
-                None,
+            .append_message(
+                session_id,
+                agent_id,
+                1,
+                xlightcli_protocol::Role::User,
+                vec![xlightcli_protocol::ContentBlock::Text {
+                    text: "Please help with Rust tests".to_string(),
+                }],
             )
             .await
             .unwrap();
 
         let outcome = handle.run_command(session_id, "/compact").await.unwrap();
-        assert!(matches!(outcome, CommandOutcome::Unavailable { .. }));
+        assert!(matches!(outcome, CommandOutcome::Message(_)));
+        let summary = handle
+            .deps()
+            .storage
+            .latest_summary(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.0, "Keep the Rust tests green.");
+    }
+
+    #[tokio::test]
+    async fn slash_logout_then_login_updates_the_auth_broker() {
+        let harness = crate::test_support::build_harness(
+            Vec::new(),
+            std::time::Duration::ZERO,
+            None,
+            xlightcli_tools::ToolRegistry::new(),
+            xlightcli_config::Config::default(),
+        )
+        .await;
+        let handle = &harness.handle;
+        let session_id = crate::test_support::new_session(&harness).await;
+        assert!(matches!(
+            handle.run_command(session_id, "/logout").await.unwrap(),
+            CommandOutcome::Message(_)
+        ));
+        assert!(handle.deps().auth.accounts(None).await.unwrap().is_empty());
+        assert!(matches!(
+            handle.run_command(session_id, "/login").await.unwrap(),
+            CommandOutcome::Message(_)
+        ));
+        assert_eq!(handle.deps().auth.accounts(None).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

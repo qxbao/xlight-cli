@@ -23,6 +23,13 @@ pub fn mock_deps(storage: xlightcli_storage::Storage) -> RuntimeDeps {
         tools: Arc::new(xlightcli_tools::ToolRegistry::with_builtins()),
         storage,
         config: xlightcli_config::Config::default(),
+        workspace_trust: Arc::new(xlightcli_config::TrustStore::empty(
+            std::env::temp_dir().join(format!(
+                "xlightcli-test-trust-{}.toml",
+                xlightcli_protocol::SessionId::new()
+            )),
+        )),
+        allow_dangerous_permissions: false,
     }
 }
 

@@ -6,17 +6,9 @@
 //! serializable contract from Wave A. [`run_exec`] now drives a real turn through
 //! [`RuntimeHandle::run_turn_for`] (`crate::agent::AgentLoop`) and reports the result.
 //!
-//! **Scope decisions (Wave B, documented):**
-//! - `--dangerously-skip-permissions` gates the headless `PermissionGate`'s `Ask` resolution
-//!   (`AutoAllow` vs. `AutoDeny`, docs/commands.md §5) but does **not** yet check workspace trust
-//!   (`xlightcli_config::TrustStore`) — `RuntimeDeps` has no trust-store handle to consult in
-//!   Wave B. The flag alone is enough to gate a local, single-user headless script; a future wave
-//!   should thread trust through before treating this as a multi-tenant-safe default.
-//! - `app::cmd::exec::dispatch` always maps any `Err(RuntimeError)` from this function to exit
-//!   code `1` and any `Ok(ExecOutput)` to exit code `0` (see its own module doc) — it does not
-//!   inspect `ExecOutput.status`. Distinguishing exit `2` (invalid input) from `1` (general
-//!   error), and exit `3` (error after partial output, `ExecOutput.status == "error"` with a
-//!   non-empty `response`) from `0`, needs an `app`-side change; flagged to the `tui+app` agent.
+//! `--dangerously-skip-permissions` requires the persisted session workspace to be trusted and
+//! the process-wide `XLIGHTCLI_ALLOW_DANGEROUS_SKIP_PERMISSIONS=1` opt-in before it changes the
+//! headless `Ask` policy to `AutoAllow` (docs/commands.md §5).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -127,8 +119,7 @@ impl ExecExitCode {
 }
 
 /// Resolves which session `run_exec` should drive: `--resume <id>` (must already exist),
-/// `--continue` (the most recently updated session, in any workspace — `exec` has no separate
-/// notion of "the current workspace" the way the TUI does), or a brand-new session for
+/// `--continue` (the most recently updated session in the current workspace), or a brand-new session for
 /// `--provider`/`--transport`/`--model` (falling back to `Config`'s `[provider.<id>]` defaults,
 /// then `default_provider`) rooted at the current working directory.
 async fn resolve_session(
@@ -140,11 +131,33 @@ async fn resolve_session(
         return Ok(id);
     }
     if options.continue_session {
-        let mut sessions = handle.list_sessions().await?;
-        sessions.sort_by_key(|record| record.updated_at);
-        let Some(record) = sessions.pop() else {
+        let current_root = std::env::current_dir().map_err(|err| {
+            RuntimeError::InvalidRequest(format!("cannot locate current workspace: {err}"))
+        })?;
+        let current_root = std::fs::canonicalize(&current_root).unwrap_or(current_root);
+        let mut latest = None;
+        for record in handle.list_sessions().await? {
+            let Some(workspace) = handle
+                .deps()
+                .storage
+                .get_workspace(record.workspace_id)
+                .await?
+            else {
+                continue;
+            };
+            if workspace.root == current_root
+                && latest
+                    .as_ref()
+                    .is_none_or(|previous: &xlightcli_storage::SessionRecord| {
+                        record.updated_at > previous.updated_at
+                    })
+            {
+                latest = Some(record);
+            }
+        }
+        let Some(record) = latest else {
             return Err(RuntimeError::InvalidRequest(
-                "--continue was given but no existing session was found".to_string(),
+                "--continue was given but no session exists in the current workspace".to_string(),
             ));
         };
         handle.resume_session(record.id).await?;
@@ -204,11 +217,34 @@ pub async fn run_exec(
     handle: &RuntimeHandle,
     options: ExecOptions,
 ) -> Result<ExecOutput, RuntimeError> {
+    if options.dangerously_skip_permissions && !handle.deps().allow_dangerous_permissions {
+        return Err(RuntimeError::InvalidRequest(
+            "--dangerously-skip-permissions requires global opt-in: set XLIGHTCLI_ALLOW_DANGEROUS_SKIP_PERMISSIONS=1".to_string(),
+        ));
+    }
     let session_id = resolve_session(handle, &options).await?;
     if let Some(mode) = options.mode {
         handle.set_execution_mode(session_id, mode).await?;
     }
     let session = handle.get_session(session_id).await?;
+    if options.dangerously_skip_permissions {
+        let workspace = handle
+            .deps()
+            .storage
+            .get_workspace(session.workspace_id)
+            .await?
+            .ok_or_else(|| {
+                RuntimeError::InvalidRequest(format!(
+                    "session {session_id} has no persisted workspace"
+                ))
+            })?;
+        if !handle.deps().workspace_trust.is_trusted(&workspace.root) {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "--dangerously-skip-permissions requires a trusted workspace: {}",
+                workspace.root.display()
+            )));
+        }
+    }
     let agent_id = handle.ensure_agent(&session).await?;
 
     let ask_policy = if options.dangerously_skip_permissions {
@@ -364,21 +400,27 @@ mod tests {
         let harness =
             harness_with_prompt_response(scripts, crate::test_support::tool_registry_with_echo())
                 .await;
+        let mut deps = harness.handle.deps().clone();
+        deps.allow_dangerous_permissions = true;
+        deps.workspace_trust
+            .trust(&std::env::current_dir().unwrap())
+            .unwrap();
+        let handle =
+            crate::handle::RuntimeHandle::new(deps, crate::handle::RuntimeConfig::default());
 
         let mut options = base_options();
         options.dangerously_skip_permissions = true;
-        let output = run_exec(&harness.handle, options).await.unwrap();
+        let output = run_exec(&handle, options).await.unwrap();
         assert_eq!(output.status, "ok");
 
         // Find the session `run_exec` created and confirm the tool actually ran and succeeded
         // (not silently skipped) — `--dangerously-skip-permissions` bypasses the `Ask` decision,
         // it doesn't fake a result (INV-10).
-        let sessions = harness.handle.list_sessions().await.unwrap();
+        let sessions = handle.list_sessions().await.unwrap();
         let session_id = sessions[0].id;
-        let session = harness.handle.get_session(session_id).await.unwrap();
-        let agent_id = harness.handle.ensure_agent(&session).await.unwrap();
-        let calls = harness
-            .handle
+        let session = handle.get_session(session_id).await.unwrap();
+        let agent_id = handle.ensure_agent(&session).await.unwrap();
+        let calls = handle
             .deps()
             .storage
             .list_tool_calls(agent_id)
@@ -388,6 +430,29 @@ mod tests {
         assert_eq!(
             calls[0].status,
             xlightcli_storage::ToolCallStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn dangerous_skip_requires_global_opt_in_and_workspace_trust() {
+        let harness =
+            harness_with_prompt_response(Vec::new(), xlightcli_tools::ToolRegistry::new()).await;
+        let mut options = base_options();
+        options.dangerously_skip_permissions = true;
+        let err = run_exec(&harness.handle, options.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidRequest(message) if message.contains("global opt-in"))
+        );
+
+        let mut deps = harness.handle.deps().clone();
+        deps.allow_dangerous_permissions = true;
+        let handle =
+            crate::handle::RuntimeHandle::new(deps, crate::handle::RuntimeConfig::default());
+        let err = run_exec(&handle, options).await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidRequest(message) if message.contains("trusted workspace"))
         );
     }
 
@@ -433,11 +498,27 @@ mod tests {
     async fn run_exec_continue_resumes_the_most_recently_updated_session() {
         let harness =
             harness_with_prompt_response(Vec::new(), xlightcli_tools::ToolRegistry::new()).await;
-        let first = crate::test_support::new_session(&harness).await;
+        let workspace = harness
+            .handle
+            .deps()
+            .storage
+            .create_workspace(std::env::current_dir().unwrap(), None)
+            .await
+            .unwrap();
+        let create = || {
+            harness.handle.create_session(
+                workspace,
+                ProviderId::new(crate::test_support::TEST_PROVIDER),
+                TransportId::new(crate::test_support::TEST_TRANSPORT),
+                ModelId::new(crate::test_support::TEST_MODEL),
+                None,
+            )
+        };
+        let first = create().await.unwrap();
         // Ensure a strictly later `created_at`/`updated_at` than `first` even on a fast
         // filesystem/clock.
         tokio::time::sleep(Duration::from_millis(5)).await;
-        let second = crate::test_support::new_session(&harness).await;
+        let second = create().await.unwrap();
 
         let mut options = ExecOptions::new("hi");
         options.continue_session = true;

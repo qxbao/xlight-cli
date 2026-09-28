@@ -28,7 +28,6 @@
 //! `crate::exec::run_exec` (both in this crate); `tui`/`app` only ever see `RuntimeHandle`'s own
 //! methods, whose signatures are unchanged, so this is not visible outside `runtime`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -228,6 +227,13 @@ impl AgentLoop {
             let mut request = context
                 .build_turn_request(&deps.storage, &deps.tools, session)
                 .await?;
+            // A provider may need a stable opaque conversation key. This is the runtime's
+            // canonical session identity, independent of message text; adapters that do not need
+            // it simply ignore the reserved provider option.
+            request.provider_options.insert(
+                "xlightcli_session_id",
+                serde_json::json!(session.id.as_uuid().to_string()),
+            );
             if let Some(window) = transport.capabilities().context_window {
                 let used = context.estimate_request_tokens(&request);
                 if context.should_compact(used, u64::from(window)) {
@@ -488,8 +494,21 @@ async fn execute_tool(
         Arc::clone(pending_permissions),
         cancel.clone(),
         headless_ask_policy,
+        deps.storage.clone(),
+        session.workspace_id,
     ));
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let workspace_root = deps
+        .storage
+        .get_workspace(session.workspace_id)
+        .await
+        .map_err(|err| xlightcli_tools::ToolError::InvalidInput(err.to_string()))?
+        .ok_or_else(|| {
+            xlightcli_tools::ToolError::InvalidInput(format!(
+                "missing workspace {} for session {}",
+                session.workspace_id, session.id
+            ))
+        })?
+        .root;
     let ctx = xlightcli_tools::ToolContext::new(
         xlightcli_tools::WorkspacePath::new(workspace_root),
         gate,
@@ -501,7 +520,8 @@ async fn execute_tool(
             artifacts_dir: xlightcli_config::paths::artifacts_dir(),
             limits: xlightcli_tools::SpoolLimits::from_config(&deps.config.tools),
         },
-    );
+    )
+    .with_shell_timeout(deps.config.tools.shell_timeout_secs);
     tool.run(input, ctx).await
 }
 
@@ -570,6 +590,15 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+        let requests = harness.requests.lock().unwrap();
+        let expected_session_key = session_id.as_uuid().to_string();
+        assert_eq!(
+            requests[0]
+                .provider_options
+                .get("xlightcli_session_id")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_session_key.as_str())
+        );
     }
 
     #[tokio::test]

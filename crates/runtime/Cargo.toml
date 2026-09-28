@@ -35,6 +35,7 @@ futures = { workspace = true }
 # `PermissionEngine`), so this doesn't add a new external dependency to the workspace.
 globset = { workspace = true }
 time = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -42,4 +43,3 @@ pretty_assertions = { workspace = true }
 insta = { workspace = true }
 uuid = { workspace = true }
 async-stream = { workspace = true }
-secrecy = { workspace = true }

@@ -19,14 +19,6 @@ use crate::tool::{Tool, ToolContext, ToolEffect, ToolError, ToolOutput};
 
 use super::definition_for;
 
-/// Fallback default timeout when the caller doesn't set `timeout_secs`, mirroring
-/// `xlightcli_config::ToolsConfig::shell_timeout_secs`'s own default (120s). `ToolContext` doesn't
-/// carry a `ToolsConfig` reference (Wave A/B scope: it's built from discrete fields, not the whole
-/// config), so this is a local constant rather than a value threaded through from config — see the
-/// Wave B report for the gap. A caller that wants the *configured* value should pass it explicitly
-/// via `timeout_secs`.
-const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShellArgs {
@@ -73,7 +65,7 @@ impl Tool for Shell {
         ctx.check_permission(PermissionAction::Command(&args.command))
             .await?;
 
-        let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS));
+        let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(ctx.shell_timeout_secs));
         let process = ctx
             .launcher
             .spawn(SpawnSpec {

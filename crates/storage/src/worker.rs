@@ -108,6 +108,31 @@ pub(crate) enum StorageCmd {
         session_id: SessionId,
         reply: oneshot::Sender<Result<Option<SessionRecord>, StorageError>>,
     },
+    GetWorkspace {
+        workspace_id: WorkspaceId,
+        reply: oneshot::Sender<Result<Option<WorkspaceRecord>, StorageError>>,
+    },
+    SavePermissionGrant {
+        workspace_id: WorkspaceId,
+        action: String,
+        target: String,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
+    ListPermissionGrants {
+        workspace_id: WorkspaceId,
+        reply: oneshot::Sender<Result<Vec<(String, String)>, StorageError>>,
+    },
+    SaveSummary {
+        session_id: SessionId,
+        agent_id: AgentId,
+        covers_until_seq: i64,
+        text: String,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
+    LatestSummary {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<Option<(String, OffsetDateTime)>, StorageError>>,
+    },
 }
 
 /// Runs on a dedicated OS thread (spawned by `Storage::open`); blocks on `rx.blocking_recv()`
@@ -217,6 +242,44 @@ fn apply(conn: &mut Connection, cmd: StorageCmd) {
         StorageCmd::GetSession { session_id, reply } => {
             let _ = reply.send(get_session(conn, &session_id));
         }
+        StorageCmd::GetWorkspace {
+            workspace_id,
+            reply,
+        } => {
+            let _ = reply.send(get_workspace(conn, &workspace_id));
+        }
+        StorageCmd::SavePermissionGrant {
+            workspace_id,
+            action,
+            target,
+            reply,
+        } => {
+            let _ = reply.send(save_permission_grant(conn, workspace_id, &action, &target));
+        }
+        StorageCmd::ListPermissionGrants {
+            workspace_id,
+            reply,
+        } => {
+            let _ = reply.send(list_permission_grants(conn, workspace_id));
+        }
+        StorageCmd::SaveSummary {
+            session_id,
+            agent_id,
+            covers_until_seq,
+            text,
+            reply,
+        } => {
+            let _ = reply.send(save_summary(
+                conn,
+                session_id,
+                agent_id,
+                covers_until_seq,
+                &text,
+            ));
+        }
+        StorageCmd::LatestSummary { session_id, reply } => {
+            let _ = reply.send(latest_summary(conn, session_id));
+        }
     }
 }
 
@@ -225,6 +288,20 @@ fn create_workspace(
     root: &std::path::Path,
     repo_id: Option<&str>,
 ) -> Result<WorkspaceId, StorageError> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE root = ?1 ORDER BY created_at LIMIT 1",
+            params![root.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        return Ok(WorkspaceId::from_uuid(
+            uuid::Uuid::parse_str(&existing)
+                .map_err(|err| StorageError::InvalidStoredData(format!("workspace id: {err}")))?,
+        ));
+    }
     let id = WorkspaceId::new();
     conn.execute(
         "INSERT INTO workspaces (id, root, repo_id, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -520,6 +597,88 @@ fn get_session(
         session_from_row,
     )
     .optional()?
+    .transpose()
+}
+
+fn get_workspace(
+    conn: &Connection,
+    workspace_id: &WorkspaceId,
+) -> Result<Option<WorkspaceRecord>, StorageError> {
+    conn.query_row(
+        "SELECT root, repo_id, created_at FROM workspaces WHERE id = ?1",
+        params![workspace_id.as_uuid().to_string()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(|(root, repo_id, created_at)| {
+        Ok(WorkspaceRecord {
+            id: *workspace_id,
+            root: root.into(),
+            repo_id,
+            created_at: parse_time(&created_at)?,
+        })
+    })
+    .transpose()
+}
+
+fn save_permission_grant(
+    conn: &Connection,
+    workspace_id: WorkspaceId,
+    action: &str,
+    target: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO permission_grants (workspace_id, action, target, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![workspace_id.as_uuid().to_string(), action, target, now()],
+    )?;
+    Ok(())
+}
+
+fn list_permission_grants(
+    conn: &Connection,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<(String, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT action, target FROM permission_grants WHERE workspace_id = ?1 ORDER BY action, target",
+    )?;
+    Ok(stmt
+        .query_map(params![workspace_id.as_uuid().to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn save_summary(
+    conn: &Connection,
+    session_id: SessionId,
+    agent_id: AgentId,
+    covers_until_seq: i64,
+    text: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO summaries (session_id, agent_id, covers_until_seq, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_id.as_uuid().to_string(), agent_id.as_uuid().to_string(), covers_until_seq, text, now()],
+    )?;
+    Ok(())
+}
+
+fn latest_summary(
+    conn: &Connection,
+    session_id: SessionId,
+) -> Result<Option<(String, OffsetDateTime)>, StorageError> {
+    conn.query_row(
+        "SELECT text, created_at FROM summaries WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+        params![session_id.as_uuid().to_string()],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()?
+    .map(|(text, created_at)| Ok((text, parse_time(&created_at)?)))
     .transpose()
 }
 

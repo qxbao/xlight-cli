@@ -9,11 +9,8 @@
 //! from `Storage`, and asks the `ToolRegistry` for its `ToolDefinition`s.
 //!
 //! **Scope decisions (Wave B, documented):**
-//! - Rule discovery reads from the process's current working directory rather than the session's
-//!   `WorkspaceRecord.root` — `Storage`'s public API doesn't yet expose a `get_workspace` accessor
-//!   (only `create_workspace`), and extending it is outside this crate's Wave B scope (`runtime`
-//!   only). [`ContextManager::with_rule_root`] lets a caller (or a test) override this explicitly;
-//!   a future wave can wire the real workspace root through once storage exposes it.
+//! - Rule discovery uses the session's persisted workspace root, while
+//!   [`ContextManager::with_rule_root`] can override it in isolated tests.
 //! - History paging loads the most recent [`HISTORY_PAGE_LIMIT`] messages rather than the whole
 //!   session (PATTERNS.md §15 "loading the whole old session into `Vec<Message>` on resume" is the
 //!   anti-pattern this avoids) — older turns are only reachable through [`Self::compact_messages`]
@@ -84,8 +81,7 @@ permissions before a side effect and prefer the smallest change that satisfies t
 pub struct ContextManager {
     compaction_threshold: f32,
     rule_sources: Vec<String>,
-    /// `None` means "discover rules relative to the process's current working directory" (see the
-    /// module doc's scope decision); `Some(root)` overrides that, e.g. for tests.
+    /// `None` means use the persisted session workspace; `Some(root)` overrides that in tests.
     rule_root: Option<PathBuf>,
 }
 
@@ -127,12 +123,6 @@ impl ContextManager {
             return false;
         }
         (used_tokens as f32 / context_window as f32) >= self.compaction_threshold
-    }
-
-    fn rule_root(&self) -> PathBuf {
-        self.rule_root
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     /// Resolves `[rules].sources` patterns (docs/PLAN.md §9.2: `AGENTS.md`, `.agents/rules/*.md`,
@@ -182,10 +172,9 @@ impl ContextManager {
 
     /// Assembles the system prompt: [`BASE_SYSTEM_PROMPT`] followed by the contents of every
     /// discovered rule file, each clearly labeled with its source path.
-    async fn build_system_prompt(&self) -> String {
-        let root = self.rule_root();
+    async fn build_system_prompt(&self, root: &Path) -> String {
         let mut sections = vec![BASE_SYSTEM_PROMPT.to_string()];
-        for path in Self::discover_rule_files(&root, &self.rule_sources) {
+        for path in Self::discover_rule_files(root, &self.rule_sources) {
             if let Ok(contents) = tokio::fs::read_to_string(&path).await {
                 sections.push(format!(
                     "--- Project rules: {} ---\n{}",
@@ -205,8 +194,24 @@ impl ContextManager {
         tools: &xlightcli_tools::ToolRegistry,
         session: &Session,
     ) -> Result<TurnRequest, RuntimeError> {
-        let system_text = self.build_system_prompt().await;
+        let root = match &self.rule_root {
+            Some(root) => root.clone(),
+            None => {
+                storage
+                    .get_workspace(session.workspace_id)
+                    .await?
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidRequest(format!(
+                            "missing workspace {} for session {}",
+                            session.workspace_id, session.id
+                        ))
+                    })?
+                    .root
+            }
+        };
+        let system_text = self.build_system_prompt(&root).await;
 
+        let latest_summary = storage.latest_summary(session.id).await?;
         let history = storage
             .load_messages(
                 session.id,
@@ -216,13 +221,24 @@ impl ContextManager {
                 },
             )
             .await?;
-        let messages: Vec<Message> = history
+        let mut messages: Vec<Message> = history
             .into_iter()
+            .filter(|record| {
+                latest_summary
+                    .as_ref()
+                    .is_none_or(|(_, at)| record.created_at > *at)
+            })
             .map(|record| Message {
                 role: record.role,
                 content: record.content,
             })
             .collect();
+        if let Some((summary, _)) = latest_summary {
+            messages.insert(
+                0,
+                Message::user_text(format!("Earlier conversation summary:\n{summary}")),
+            );
+        }
 
         Ok(TurnRequest {
             model: session.model.clone(),
@@ -347,6 +363,62 @@ mod build_turn_request_tests {
         assert!(matches!(
             &request.messages[0].content[0],
             ContentBlock::Text { text } if text == "hello there"
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_turn_request_keeps_tool_use_before_its_result() {
+        let (storage, _dir) = test_storage().await;
+        let session = test_session(&storage).await;
+        let agent = storage
+            .register_agent(session.id, None, serde_json::json!({}))
+            .await
+            .unwrap();
+        let call_id = xlightcli_protocol::ToolCallId::new("readme-call");
+        storage
+            .append_message(
+                session.id,
+                agent,
+                1,
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "README.md"}),
+                    opaque: None,
+                }],
+            )
+            .await
+            .unwrap();
+        storage
+            .append_message(
+                session.id,
+                agent,
+                2,
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    call_id,
+                    content: vec![xlightcli_protocol::ToolResultPart::Text {
+                        text: "README contents".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let request = ContextManager::new(0.8)
+            .with_rule_root(std::env::temp_dir())
+            .build_turn_request(&storage, &xlightcli_tools::ToolRegistry::new(), &session)
+            .await
+            .unwrap();
+        assert!(matches!(
+            request.messages[0].content[0],
+            ContentBlock::ToolUse { .. }
+        ));
+        assert!(matches!(
+            request.messages[1].content[0],
+            ContentBlock::ToolResult { .. }
         ));
     }
 

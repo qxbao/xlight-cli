@@ -1,0 +1,101 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/protocol",
+    "crates/config",
+    "crates/storage",
+    "crates/auth",
+    "crates/provider",
+    "crates/provider-codex",
+    "crates/provider-claude",
+    "crates/provider-agy",
+    "crates/tools",
+    "crates/mcp",
+    "crates/runtime",
+    "crates/tui",
+    "crates/app",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+version = "0.0.1"
+rust-version = "1.90"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+dbg_macro = "warn"
+
+[workspace.dependencies]
+# --- internal crates ---
+xlightcli-protocol = { path = "crates/protocol" }
+xlightcli-config = { path = "crates/config" }
+xlightcli-storage = { path = "crates/storage" }
+xlightcli-auth = { path = "crates/auth" }
+xlightcli-provider = { path = "crates/provider" }
+xlightcli-provider-codex = { path = "crates/provider-codex" }
+xlightcli-provider-claude = { path = "crates/provider-claude" }
+xlightcli-provider-agy = { path = "crates/provider-agy" }
+xlightcli-tools = { path = "crates/tools" }
+xlightcli-mcp = { path = "crates/mcp" }
+xlightcli-runtime = { path = "crates/runtime" }
+xlightcli-tui = { path = "crates/tui" }
+
+# --- async runtime & streams ---
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = "0.7.19"
+futures = "0.3.34"
+async-trait = "0.1.92"
+async-stream = "0.3.6"
+bytes = "1.12.1"
+
+# --- serde & data ---
+serde = { version = "1.0.229", features = ["derive"] }
+# preserve_order workspace-wide: otherwise feature unification (xtask) makes map ordering
+# differ between per-crate and workspace builds, breaking snapshots.
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+toml = "1.1.6"
+schemars = "1.2.2"
+
+# --- errors & logging ---
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+# --- HTTP / networking ---
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "stream", "http2", "rustls"] }
+http = "1.5.0"
+url = "2.5.8"
+
+# --- credentials & crypto ---
+secrecy = "0.10.3"
+zeroize = "1.9.0"
+keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
+sha2 = "0.11.0"
+base64 = "0.23.1"
+rand = "0.10.3"
+
+# --- persistence & paths ---
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+directories = "6.0.0"
+
+# --- misc ---
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
+time = { version = "0.3.55", features = ["serde-well-known", "formatting", "parsing", "macros"] }
+clap = { version = "4.6.7", features = ["derive"] }
+open = "5.4.4"
+
+# --- dev / test only ---
+insta = { version = "1.48.0", features = ["yaml", "json"] }
+wiremock = "0.6.5"
+tempfile = "3.27.0"
+pretty_assertions = "1.4.1"

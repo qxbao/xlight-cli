@@ -1,0 +1,27 @@
+: synthetic fixture modeled on the public OpenAI Responses API streaming events plus the
+: `include: ["reasoning.encrypted_content"]` field confirmed in openai/codex codex-rs/core/src/client.rs
+: (Apache-2.0) @ 1cc7e2361237ce7244430ee1d581c77f95c57ac8; no real tokens/ids.
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_reasoning_1","model":"gpt-5-codex","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_1","delta":"Let me "}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_1","delta":"think..."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Let me think..."}],"encrypted_content":"ocxr1:synthetic-opaque-blob-not-a-real-secret"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_1","delta":"42"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_reasoning_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Let me think..."}],"encrypted_content":"ocxr1:synthetic-opaque-blob-not-a-real-secret"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"42"}]}],"usage":{"input_tokens":20,"output_tokens":5,"input_tokens_details":{"cached_tokens":8},"output_tokens_details":{"reasoning_tokens":16}}}}

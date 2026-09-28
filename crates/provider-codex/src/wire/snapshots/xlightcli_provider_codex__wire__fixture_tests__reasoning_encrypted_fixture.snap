@@ -1,0 +1,12 @@
+---
+source: crates/provider-codex/src/wire/fixture_tests.rs
+assertion_line: 85
+expression: events
+---
+[
+    "TurnStarted { model: ModelId(\"gpt-5-codex\") }",
+    "ReasoningDelta { index: 0, text: \"Let me \" }",
+    "ReasoningDelta { index: 0, text: \"think...\" }",
+    "TextDelta { index: 1, text: \"42\" }",
+    "Completed { message: Message { role: Assistant, content: [Reasoning { text: Some(\"Let me think...\"), opaque: Some(OpaqueBlob { provider: ProviderId(\"codex\"), transport: TransportId(\"chatgpt\"), data: Object {\"id\": String(\"rs_1\"), \"summary\": Array [Object {\"type\": String(\"summary_text\"), \"text\": String(\"Let me think...\")}], \"encrypted_content\": String(\"ocxr1:synthetic-opaque-blob-not-a-real-secret\")} }) }, Text { text: \"42\" }] }, stop: EndTurn, usage: Usage { input_tokens: 20, output_tokens: 5, cached_input_tokens: 8, reasoning_tokens: 16 } }",
+]

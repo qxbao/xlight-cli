@@ -1,0 +1,32 @@
+---
+source: crates/provider-claude/src/wire/response.rs
+expression: events
+---
+- type: usage
+  input_tokens: 10
+  output_tokens: 0
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: text_delta
+  index: 0
+  text: Hello
+- type: text_delta
+  index: 0
+  text: ", world!"
+- type: usage
+  input_tokens: 10
+  output_tokens: 5
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: text
+        text: "Hello, world!"
+  stop: end_turn
+  usage:
+    input_tokens: 10
+    output_tokens: 5
+    cached_input_tokens: 0
+    reasoning_tokens: 0

@@ -1,0 +1,21 @@
+[package]
+name = "xlightcli-tools"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "Tool trait, ToolRegistry, PermissionEngine, ProcessLauncher, OutputSpool (Phase 1 skeleton)"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+xlightcli-config = { workspace = true }
+xlightcli-storage = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }

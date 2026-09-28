@@ -1,0 +1,63 @@
+[package]
+name = "xlightcli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "xlightcli binary: CLI, wiring, provider registration"
+
+[lints]
+workspace = true
+
+[lib]
+name = "xlightcli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xlightcli"
+path = "src/main.rs"
+
+[features]
+default = []
+# Experimental subscription transports (D-002). Off by default; also require the runtime opt-in
+# env vars XLIGHTCLI_EXPERIMENTAL_CLAUDE_SUBSCRIPTION=1 / XLIGHTCLI_EXPERIMENTAL_ANTIGRAVITY=1.
+claude-subscription = ["xlightcli-provider-claude/claude-subscription"]
+antigravity-subscription = ["xlightcli-provider-agy/antigravity-subscription"]
+experimental = ["claude-subscription", "antigravity-subscription"]
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+xlightcli-config = { workspace = true }
+xlightcli-storage = { workspace = true }
+xlightcli-auth = { workspace = true }
+xlightcli-provider = { workspace = true }
+xlightcli-provider-codex = { workspace = true }
+xlightcli-provider-claude = { workspace = true }
+xlightcli-provider-agy = { workspace = true }
+xlightcli-tools = { workspace = true }
+xlightcli-mcp = { workspace = true }
+xlightcli-runtime = { workspace = true }
+xlightcli-tui = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+secrecy = { workspace = true }
+open = { workspace = true }
+# Not in [workspace.dependencies]: only needed here, for `auth login`'s "read API key from stdin
+# without echo" requirement (Wave 2 brief). MIT/Apache-2.0, allowed by deny.toml.
+rpassword = "7.5"
+
+[dev-dependencies]
+xlightcli-auth = { workspace = true, features = ["testing"] }
+xlightcli-provider = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
+# Only needed in test code (`AccountInfo::metadata` fixtures below).
+serde_json = { workspace = true }

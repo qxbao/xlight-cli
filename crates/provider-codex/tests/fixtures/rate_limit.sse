@@ -1,0 +1,14 @@
+: synthetic fixture for the `codex.rate_limits` SSE event (U — shape per docs/providers/codex.md,
+: not independently verified in this pass); no real tokens/ids.
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_rl_1","model":"gpt-5-codex","status":"in_progress"}}
+
+event: codex.rate_limits
+data: {"type":"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":63.0,"resets_in_seconds":1800}}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"ok"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_rl_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}

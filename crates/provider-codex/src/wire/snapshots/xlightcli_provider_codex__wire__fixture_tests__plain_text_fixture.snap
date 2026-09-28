@@ -1,0 +1,11 @@
+---
+source: crates/provider-codex/src/wire/fixture_tests.rs
+assertion_line: 60
+expression: events
+---
+[
+    "TurnStarted { model: ModelId(\"gpt-5-codex\") }",
+    "TextDelta { index: 0, text: \"Hel\" }",
+    "TextDelta { index: 0, text: \"lo!\" }",
+    "Completed { message: Message { role: Assistant, content: [Text { text: \"Hello!\" }] }, stop: EndTurn, usage: Usage { input_tokens: 12, output_tokens: 3, cached_input_tokens: 0, reasoning_tokens: 0 } }",
+]

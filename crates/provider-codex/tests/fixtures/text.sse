@@ -1,0 +1,23 @@
+: synthetic fixture modeled on the public OpenAI Responses API streaming events
+: (platform.openai.com/docs/api-reference/responses-streaming); no real tokens/ids.
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_text_1","model":"gpt-5-codex","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"Hel"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"lo!"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","output_index":0,"item_id":"msg_1","text":"Hello!"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_text_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}],"usage":{"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}

@@ -1,0 +1,11 @@
+: synthetic fixture modeled on the public OpenAI Responses API streaming events (a top-level
+: `error` event can arrive instead of `response.completed`); no real tokens/ids.
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_error_1","model":"gpt-5-codex","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"Star"}
+
+event: error
+data: {"type":"error","code":"server_error","message":"synthetic upstream failure mid-stream"}

@@ -1,0 +1,23 @@
+[package]
+name = "xlightcli-storage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "SQLite-backed persistence worker for xlightcli (Wave 2 / Phase 1)"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "xlightcli-config"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "Config layering, XDG paths and experimental-flag gating for xlightcli"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }

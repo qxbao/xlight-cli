@@ -1,0 +1,6 @@
+: synthetic fixture modeled on OpenCodex (MIT) @ 3cc34e1181926b64331490fdcfee162ffb62fe73 src/adapters/google.ts (thought + thoughtSignature parts) — no real account data.
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Let me think about this.","thought":true,"thoughtSignature":"c3ludGhldGljLXNpZ25hdHVyZS0x"}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"The answer is 4."}]},"finishReason":"STOP"}]}
+

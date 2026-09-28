@@ -1,0 +1,20 @@
+[package]
+name = "xlightcli-protocol"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "Canonical, IO-free protocol types shared by all xlightcli crates"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

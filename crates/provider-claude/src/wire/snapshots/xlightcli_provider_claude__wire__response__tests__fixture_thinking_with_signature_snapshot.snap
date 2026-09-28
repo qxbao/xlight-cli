@@ -1,0 +1,39 @@
+---
+source: crates/provider-claude/src/wire/response.rs
+expression: events
+---
+- type: usage
+  input_tokens: 20
+  output_tokens: 0
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: reasoning_delta
+  index: 0
+  text: Let me work through this step by step.
+- type: text_delta
+  index: 1
+  text: The answer is 42.
+- type: usage
+  input_tokens: 20
+  output_tokens: 12
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: reasoning
+        text: Let me work through this step by step.
+        opaque:
+          provider: claude
+          transport: anthropic-api
+          data:
+            signature: fixture-signature-abc123
+      - type: text
+        text: The answer is 42.
+  stop: end_turn
+  usage:
+    input_tokens: 20
+    output_tokens: 12
+    cached_input_tokens: 0
+    reasoning_tokens: 0

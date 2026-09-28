@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "Dev tooling: check-deps, no-provider-cli, bench-mem, redact-fixture (not shipped)"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+# Not in [workspace.dependencies]: xtask is dev tooling (not shipped), and regex is only needed
+# here for `redact-fixture`'s pattern matching. MIT/Apache-2.0, allowed by deny.toml.
+regex = "1.11.3"

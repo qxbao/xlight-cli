@@ -1,0 +1,18 @@
+[package]
+name = "xlightcli-mcp"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "McpManager, ConnectionPool, ToolBridge (Phase 3 skeleton)"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+xlightcli-config = { workspace = true }
+xlightcli-tools = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

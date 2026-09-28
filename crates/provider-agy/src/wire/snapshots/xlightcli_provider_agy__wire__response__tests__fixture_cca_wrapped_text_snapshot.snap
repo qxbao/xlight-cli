@@ -1,0 +1,24 @@
+---
+source: crates/provider-agy/src/wire/response.rs
+expression: events
+---
+- type: text_delta
+  index: 0
+  text: Hi
+- type: usage
+  input_tokens: 4
+  output_tokens: 1
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: text
+        text: Hi
+  stop: end_turn
+  usage:
+    input_tokens: 4
+    output_tokens: 1
+    cached_input_tokens: 0
+    reasoning_tokens: 0

@@ -1,0 +1,10 @@
+---
+source: crates/provider-codex/src/wire/fixture_tests.rs
+assertion_line: 84
+expression: events
+---
+[
+    "TurnStarted { model: ModelId(\"gpt-5-codex\") }",
+    "TextDelta { index: 0, text: \"Star\" }",
+    "Err(Upstream { status: 0, body_excerpt: \"synthetic upstream failure mid-stream\" })",
+]

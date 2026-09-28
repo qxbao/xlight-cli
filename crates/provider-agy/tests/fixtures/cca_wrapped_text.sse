@@ -1,0 +1,6 @@
+: synthetic fixture modeled on OpenCodex (MIT) @ 3cc34e1181926b64331490fdcfee162ffb62fe73 src/adapters/google.ts parseStream (Cloud Code Assist "{response: {...}}" wrapper shape) — no real account data.
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}]}}
+
+data: {"response":{"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1},"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}}
+

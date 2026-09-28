@@ -1,0 +1,32 @@
+---
+source: crates/provider-agy/src/wire/response.rs
+expression: events
+---
+- type: tool_call_started
+  index: 0
+  id: call_1
+  name: read_file
+- type: tool_call_started
+  index: 1
+  id: call_2
+  name: read_file
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: tool_use
+        id: call_1
+        name: read_file
+        input:
+          path: a.rs
+      - type: tool_use
+        id: call_2
+        name: read_file
+        input:
+          path: b.rs
+  stop: tool_use
+  usage:
+    input_tokens: 0
+    output_tokens: 0
+    cached_input_tokens: 0
+    reasoning_tokens: 0

@@ -1,0 +1,45 @@
+[package]
+name = "xlightcli-auth"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "AuthBroker, CredentialHandle and OAuth toolkit contract for xlightcli"
+
+[features]
+# Enables CredentialHandle::for_tests / static-token constructors for adapter unit tests
+# (docs/PLAN.md §6, item 3 of the Wave 1 brief). Never enabled in release builds.
+testing = []
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+xlightcli-config = { workspace = true }
+xlightcli-storage = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+keyring = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

@@ -1,0 +1,42 @@
+---
+source: crates/provider-claude/src/wire/response.rs
+expression: events
+---
+- type: usage
+  input_tokens: 18
+  output_tokens: 0
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: tool_call_started
+  index: 0
+  id: toolu_fixture_a
+  name: read_file
+- type: tool_call_started
+  index: 1
+  id: toolu_fixture_b
+  name: grep
+- type: usage
+  input_tokens: 18
+  output_tokens: 10
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: tool_use
+        id: toolu_fixture_a
+        name: read_file
+        input:
+          path: a.rs
+      - type: tool_use
+        id: toolu_fixture_b
+        name: grep
+        input:
+          pattern: TODO
+  stop: tool_use
+  usage:
+    input_tokens: 18
+    output_tokens: 10
+    cached_input_tokens: 0
+    reasoning_tokens: 0

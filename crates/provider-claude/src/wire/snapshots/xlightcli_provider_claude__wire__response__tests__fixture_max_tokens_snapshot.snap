@@ -1,0 +1,29 @@
+---
+source: crates/provider-claude/src/wire/response.rs
+expression: events
+---
+- type: usage
+  input_tokens: 5
+  output_tokens: 0
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: text_delta
+  index: 0
+  text: This answer runs out of room
+- type: usage
+  input_tokens: 5
+  output_tokens: 100
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: text
+        text: This answer runs out of room
+  stop: max_tokens
+  usage:
+    input_tokens: 5
+    output_tokens: 100
+    cached_input_tokens: 0
+    reasoning_tokens: 0

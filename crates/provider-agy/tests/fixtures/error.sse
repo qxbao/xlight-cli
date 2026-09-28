@@ -1,0 +1,4 @@
+: synthetic fixture modeled on OpenCodex (MIT) @ 3cc34e1181926b64331490fdcfee162ffb62fe73 src/adapters/google.ts (inline error object on a 200 SSE stream) — no real account data.
+
+data: {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}
+

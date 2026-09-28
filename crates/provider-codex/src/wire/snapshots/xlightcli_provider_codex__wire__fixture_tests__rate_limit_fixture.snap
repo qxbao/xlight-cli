@@ -1,0 +1,11 @@
+---
+source: crates/provider-codex/src/wire/fixture_tests.rs
+assertion_line: 109
+expression: events
+---
+[
+    "TurnStarted { model: ModelId(\"gpt-5-codex\") }",
+    "RateLimit(RateLimitInfo { limit: Some(100), remaining: Some(37), reset_at: Some(<redacted: now + delta>) })",
+    "TextDelta { index: 0, text: \"ok\" }",
+    "Completed { message: Message { role: Assistant, content: [Text { text: \"ok\" }] }, stop: EndTurn, usage: Usage { input_tokens: 5, output_tokens: 1, cached_input_tokens: 0, reasoning_tokens: 0 } }",
+]

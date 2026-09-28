@@ -1,0 +1,11 @@
+---
+source: crates/provider-codex/src/wire/fixture_tests.rs
+assertion_line: 97
+expression: events
+---
+[
+    "TurnStarted { model: ModelId(\"gpt-5-codex\") }",
+    "ToolCallStarted { index: 0, id: ToolCallId(\"call_1\"), name: \"read_file\" }",
+    "ToolCallStarted { index: 1, id: ToolCallId(\"call_2\"), name: \"list_files\" }",
+    "Completed { message: Message { role: Assistant, content: [ToolUse { id: ToolCallId(\"call_1\"), name: \"read_file\", input: Object {\"path\": String(\"a.rs\")}, opaque: None }, ToolUse { id: ToolCallId(\"call_2\"), name: \"list_files\", input: Object {\"dir\": String(\".\")}, opaque: None }] }, stop: ToolUse, usage: Usage { input_tokens: 18, output_tokens: 10, cached_input_tokens: 0, reasoning_tokens: 0 } }",
+]

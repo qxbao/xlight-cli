@@ -1,0 +1,10 @@
+# PATTERNS.md §1 — enforce INV-1 and INV-6 at lint time.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "spawn only via tools::launcher::ProcessLauncher (INV-1)" },
+    { path = "tokio::process::Command::new", reason = "spawn only via tools::launcher::ProcessLauncher (INV-1)" },
+    { path = "tokio::sync::mpsc::unbounded_channel", reason = "use bounded channels for backpressure (INV-6)" },
+]
+
+# unwrap/expect are fine inside #[test] fns (PATTERNS.md §2 forbids them only outside tests).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

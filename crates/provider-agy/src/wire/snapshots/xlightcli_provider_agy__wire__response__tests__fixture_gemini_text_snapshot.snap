@@ -1,0 +1,27 @@
+---
+source: crates/provider-agy/src/wire/response.rs
+expression: events
+---
+- type: text_delta
+  index: 0
+  text: Hel
+- type: text_delta
+  index: 0
+  text: lo!
+- type: usage
+  input_tokens: 8
+  output_tokens: 3
+  cached_input_tokens: 0
+  reasoning_tokens: 0
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: text
+        text: Hello!
+  stop: end_turn
+  usage:
+    input_tokens: 8
+    output_tokens: 3
+    cached_input_tokens: 0
+    reasoning_tokens: 0

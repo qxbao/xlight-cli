@@ -1,0 +1,29 @@
+---
+source: crates/provider-agy/src/wire/response.rs
+expression: events
+---
+- type: reasoning_delta
+  index: 0
+  text: Let me think about this.
+- type: text_delta
+  index: 1
+  text: The answer is 4.
+- type: completed
+  message:
+    role: assistant
+    content:
+      - type: reasoning
+        text: Let me think about this.
+        opaque:
+          provider: agy
+          transport: gemini-api
+          data:
+            thoughtSignature: c3ludGhldGljLXNpZ25hdHVyZS0x
+      - type: text
+        text: The answer is 4.
+  stop: end_turn
+  usage:
+    input_tokens: 0
+    output_tokens: 0
+    cached_input_tokens: 0
+    reasoning_tokens: 0

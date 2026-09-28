@@ -1,0 +1,25 @@
+[package]
+name = "xlightcli-runtime"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+description = "Provider-independent agent runtime: Session, AgentLoop, ContextManager, Scheduler (Phase 1+ skeleton)"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlightcli-protocol = { workspace = true }
+xlightcli-config = { workspace = true }
+xlightcli-storage = { workspace = true }
+xlightcli-auth = { workspace = true }
+xlightcli-provider = { workspace = true }
+xlightcli-tools = { workspace = true }
+xlightcli-mcp = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

@@ -21,6 +21,12 @@
 
 ## `antigravity` — ported from OpenCodex (U, not live-verified)
 
+**Session identity (implemented 2026-09-28):** normal runtime turns carry the persisted xlightcli
+session UUID as an opaque provider option. The adapter hashes it to CCA's numeric
+`request.sessionId`, so it remains stable across turns without colliding merely because two
+conversations share their first user prompt. The legacy first-user-text seed remains only for
+standalone requests with no runtime session.
+
 Source: OpenCodex (MIT) `@ 3cc34e1181926b64331490fdcfee162ffb62fe73` —
 `src/oauth/google-antigravity.ts`, `src/adapters/google-antigravity-wire.ts`, `src/adapters/google.ts`,
 `src/providers/antigravity-models.ts`, `src/providers/quota/antigravity.ts`,

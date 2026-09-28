@@ -12,6 +12,24 @@
 
 ## 0. Status by crate
 
+Phase 1 completion amendments (supersede older Wave B gap annotations below):
+
+- `RuntimeDeps` now carries `workspace_trust: Arc<TrustStore>` and
+  `allow_dangerous_permissions: bool`. The global opt-in and the session's persisted workspace
+  trust are both required for headless permission bypass.
+- `Storage` exposes `get_workspace`, exact workspace permission grants, `save_summary`,
+  `latest_summary`, and `latest_event_seq`. Migration `0003_permission_grants.sql` is append-only.
+- `RuntimeHandle` exposes `session_providers`, `session_transports`, `session_models`, and
+  `start_session` for the TUI picker. `PermissionResponse::AllowAlways` persists the exact
+  action/target in the current workspace. `/compact` invokes the active transport to produce a
+  persisted summary; `/login` and `/logout` call `AuthBroker` for the active session.
+- `ToolContext::with_shell_timeout` applies the resolved config default. Rules and tool paths
+  use the persisted session workspace root. The TUI starts submitted turns and the longer slash
+  commands in tasks so it can continue handling UI events.
+- The session picker accepts a typed model ID even with an empty catalog. Codex `openai-api`
+  fetches `GET /v1/models`; Codex `chatgpt` displays a small suggestion list because its catalog
+  endpoint is unverified. Model IDs are validated by the upstream on the first turn.
+
 | Crate | Status | What Wave B does |
 |-------|-----------|----------------|
 | `xlightcli-protocol` | **usable** — full canonical types incl. `WorkspaceId` (Wave A addition), serde roundtrip tests | Extend when a new field is needed (rare) |
@@ -922,7 +940,7 @@ pub enum UiEvent {
     ModeChanged { session_id: SessionId, mode: xlightcli_tools::ExecutionMode },
     Notice { level: NoticeLevel, message: String },
 }
-pub enum PermissionResponse { Allow, Deny }
+pub enum PermissionResponse { Allow, AllowAlways, Deny }
 pub enum CommandOutcome { Message(String), TurnStarted, Unavailable { reason: String } }
 
 #[derive(Clone)] pub struct RuntimeHandle; // the ONLY API tui/app use
@@ -930,6 +948,10 @@ impl RuntimeHandle {
     pub fn new(deps: RuntimeDeps, config: RuntimeConfig) -> Self;
     pub fn deps(&self) -> &RuntimeDeps;
     pub fn commands(&self) -> &CommandRegistry;
+    pub fn session_providers(&self) -> Vec<(ProviderId, String)>;
+    pub fn session_transports(&self, provider: &ProviderId) -> Result<Vec<(TransportId, Stability)>, RuntimeError>;
+    pub async fn session_models(&self, provider: &ProviderId, transport: &TransportId) -> Result<Vec<ModelInfo>, RuntimeError>;
+    pub async fn start_session(&self, provider: ProviderId, transport: TransportId, model: ModelId) -> Result<SessionId, RuntimeError>;
     pub async fn subscribe(&self) -> Result<mpsc::Receiver<UiEvent>, RuntimeError>; // callable exactly once
     pub async fn create_session(&self, workspace_id: WorkspaceId, provider: ProviderId, transport: TransportId,
                                  model: ModelId, title: Option<String>) -> Result<SessionId, RuntimeError>;
@@ -1030,13 +1052,9 @@ pub async fn run_exec(handle: &RuntimeHandle, options: ExecOptions) -> Result<Ex
 // Real (Wave B): resolves the session (--resume / --continue / new from --provider/--transport/
 // --model + Config defaults), applies --mode, drives one turn headless (`--dangerously-skip-
 // permissions` picks AutoAllow vs. AutoDeny for an `Ask` decision — there's no UI to prompt),
-// enforces --print-timeout. See exec.rs's module doc for two flagged app-side follow-ups:
-// (1) `app::cmd::exec::dispatch` always maps `Err` -> exit 1 / `Ok` -> exit 0 today; distinguishing
-// exit 2 (RuntimeError::InvalidRequest) and exit 3 (ExecOutput.status != "ok" with a non-empty
-// response) needs an app-side change. (2) real `stream-json` incremental rendering needs app to
-// concurrently `handle.subscribe()` while `run_exec` runs, not just render the final ExecOutput.
-// (3) --dangerously-skip-permissions does not check workspace trust yet (no TrustStore handle on
-// RuntimeDeps in Wave B) — flag before treating it as multi-tenant-safe.
+// enforces --print-timeout. App maps invalid requests to exit 2 and partial responses to exit 3,
+// and streams UiEvents as NDJSON when requested. Dangerous permission bypass is allowed only
+// after checking both global opt-in and the persisted session workspace against TrustStore.
 
 pub enum RuntimeError { UnknownSession(SessionId), NoActiveTurn(SessionId), UnknownCommand(String),
     NoPendingPermission(ToolCallId), AlreadySubscribed, Storage(#[from] StorageError),
@@ -1073,6 +1091,9 @@ pub async fn run(handle: xlightcli_runtime::RuntimeHandle, opts: TuiOptions) -> 
 // events (Event::Resize marks the frame dirty). Renders on a ~20 FPS ticking interval whenever
 // App::dirty is set (never once per delta, PATTERNS.md §3) via Terminal::draw(|f| app.draw(f)).
 // Restores the terminal on the way out regardless of how the loop exited.
+// With no initial_session, a provider/transport/model picker opens and start_session persists the
+// workspace/session before the first prompt. Submit runs in a separate async task so the event
+// loop can keep handling permission requests, cancel, and redraws.
 
 pub enum TuiError { Io(#[from] std::io::Error), Runtime(#[from] xlightcli_runtime::RuntimeError),
                      NotImplemented(&'static str) }
@@ -1097,13 +1118,15 @@ impl App {
     pub fn open_diff(&mut self, view: view::DiffView); // used by `/diff`'s CommandOutcome handling
     pub fn draw(&self, frame: &mut ratatui::Frame<'_>); // status line + transcript + prompt + overlay popup
 }
-pub enum Overlay { None, CommandPalette(view::CommandPaletteView), Permission(view::PermissionDialogView), Diff(view::DiffView) }
+pub enum Overlay { None, CommandPalette(view::CommandPaletteView), Permission(view::PermissionDialogView), Diff(view::DiffView), SessionSetup(view::SessionSetupView) }
 
 // [Wave B addition] what `App::on_key` asks `crate::run`'s event loop to do with the RuntimeHandle
 // (kept out of App so on_key stays synchronous/pure):
 pub enum Intent { None, Quit, Submit(String), RunCommand(String),
     RespondPermission(ToolCallId, xlightcli_runtime::PermissionResponse), CancelTurn,
-    SetExecutionMode(xlightcli_runtime::ExecutionMode) }
+    SetExecutionMode(xlightcli_runtime::ExecutionMode), SelectProvider(ProviderId),
+    SelectTransport(ProviderId, TransportId), SelectModel(ProviderId, TransportId, ModelId),
+    SetupBack(view::SetupStage) }
 
 // keymap.rs
 pub enum Action { Submit, Quit, Cancel /* [Wave B addition]: Esc */, CycleExecutionMode,

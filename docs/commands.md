@@ -155,6 +155,10 @@ Action: `read_file`, `write_file`, `command`, `read_url`, `mcp`, `unsandboxed`.
 | `-c, --continue`, `--conversation <id>` / `--resume <id>` | agy, CC |
 | `--add-dir`, `--print-timeout` (default 5m) | agy |
 | `--dangerously-skip-permissions` | agy, CC (requires workspace trust + global opt-in) |
+
+For xlightcli, set the global opt-in `XLIGHTCLI_ALLOW_DANGEROUS_SKIP_PERMISSIONS=1`. The workspace
+must also be in `$XDG_DATA_HOME/xlightcli/trust.toml`; `--resume` checks the resumed session's
+persisted workspace even when invoked from another directory.
 | Exit code `0` ok · `1` general error · `2` bad input · `3` model/agent error after output was already produced | agy |
 
 JSON output: `{conversation_id, status, response, usage{input,output,thinking,cache_read,total}_tokens}`.

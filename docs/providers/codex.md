@@ -6,6 +6,13 @@
 
 ## Transports
 
+Model discovery (2026-09-28): `openai-api` now calls the public `GET /v1/models` endpoint
+(**H**, public API documentation; mock HTTP test, not a live account check). `chatgpt` has no
+verified catalog endpoint (**U**), so its picker offers `gpt-6-sol` and `gpt-6-luna` as
+user-requested suggestions (**U**, not entitlement claims) and `gpt-5.6-terra` as a
+**verified 2026-09-28** live-probed model. Users may type any model ID; the server validates it
+on the first turn.
+
 | Transport | Stability | Auth | Notes |
 |-----------|-----------|------|---------|
 | `chatgpt` | Stable | ChatGPT OAuth (PKCE loopback / device code) | Responses-style SSE via the ChatGPT backend (`https://chatgpt.com/backend-api`, **M** — see §"chatgpt backend endpoint" below) |

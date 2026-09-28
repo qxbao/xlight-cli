@@ -31,7 +31,8 @@ fn now() -> String {
 }
 
 fn parse_time(s: &str) -> Result<OffsetDateTime, StorageError> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|e| StorageError::InvalidStoredData(format!("timestamp: {e}")))
+    OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|e| StorageError::InvalidStoredData(format!("timestamp: {e}")))
 }
 
 /// One write request. Every variant carries a `oneshot::Sender` for its reply; the writer thread
@@ -119,7 +120,11 @@ pub(crate) fn run(mut conn: Connection, mut rx: tokio::sync::mpsc::Receiver<Stor
 
 fn apply(conn: &mut Connection, cmd: StorageCmd) {
     match cmd {
-        StorageCmd::CreateWorkspace { root, repo_id, reply } => {
+        StorageCmd::CreateWorkspace {
+            root,
+            repo_id,
+            reply,
+        } => {
             let _ = reply.send(create_workspace(conn, &root, repo_id.as_deref()));
         }
         StorageCmd::CreateSession {
@@ -130,9 +135,20 @@ fn apply(conn: &mut Connection, cmd: StorageCmd) {
             title,
             reply,
         } => {
-            let _ = reply.send(create_session(conn, &workspace_id, &provider, &transport, &model, title.as_deref()));
+            let _ = reply.send(create_session(
+                conn,
+                &workspace_id,
+                &provider,
+                &transport,
+                &model,
+                title.as_deref(),
+            ));
         }
-        StorageCmd::UpdateSessionStatus { session_id, status, reply } => {
+        StorageCmd::UpdateSessionStatus {
+            session_id,
+            status,
+            reply,
+        } => {
             let _ = reply.send(update_session_status(conn, &session_id, status));
         }
         StorageCmd::RegisterAgent {
@@ -141,9 +157,18 @@ fn apply(conn: &mut Connection, cmd: StorageCmd) {
             profile,
             reply,
         } => {
-            let _ = reply.send(register_agent(conn, &session_id, parent_id.as_ref(), &profile));
+            let _ = reply.send(register_agent(
+                conn,
+                &session_id,
+                parent_id.as_ref(),
+                &profile,
+            ));
         }
-        StorageCmd::AppendEvents { session_id, events, reply } => {
+        StorageCmd::AppendEvents {
+            session_id,
+            events,
+            reply,
+        } => {
             let _ = reply.send(append_events(conn, &session_id, events));
         }
         StorageCmd::AppendMessage {
@@ -154,7 +179,14 @@ fn apply(conn: &mut Connection, cmd: StorageCmd) {
             content,
             reply,
         } => {
-            let _ = reply.send(append_message(conn, &session_id, &agent_id, turn, role, &content));
+            let _ = reply.send(append_message(
+                conn,
+                &session_id,
+                &agent_id,
+                turn,
+                role,
+                &content,
+            ));
         }
         StorageCmd::RecordToolCall { call, reply } => {
             let _ = reply.send(record_tool_call(conn, call));
@@ -176,7 +208,10 @@ fn apply(conn: &mut Connection, cmd: StorageCmd) {
         StorageCmd::MarkInterruptedOnOpen { reply } => {
             let _ = reply.send(mark_interrupted_on_open(conn));
         }
-        StorageCmd::ListSessions { workspace_id, reply } => {
+        StorageCmd::ListSessions {
+            workspace_id,
+            reply,
+        } => {
             let _ = reply.send(list_sessions(conn, workspace_id));
         }
         StorageCmd::GetSession { session_id, reply } => {
@@ -193,7 +228,12 @@ fn create_workspace(
     let id = WorkspaceId::new();
     conn.execute(
         "INSERT INTO workspaces (id, root, repo_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![id.as_uuid().to_string(), root.to_string_lossy(), repo_id, now()],
+        params![
+            id.as_uuid().to_string(),
+            root.to_string_lossy(),
+            repo_id,
+            now()
+        ],
     )?;
     Ok(id)
 }
@@ -269,13 +309,13 @@ fn append_events(
         return Ok(Vec::new());
     }
     let tx = conn.transaction()?;
-    let mut next_seq: i64 = tx.query_row(
+    let first_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?1",
         params![session_id.as_uuid().to_string()],
         |row| row.get(0),
     )?;
     let mut ids = Vec::with_capacity(events.len());
-    for event in events {
+    for (offset, event) in events.into_iter().enumerate() {
         let created_at = now();
         tx.execute(
             "INSERT INTO events (session_id, agent_id, seq, kind, payload_json, created_at)
@@ -283,14 +323,13 @@ fn append_events(
             params![
                 session_id.as_uuid().to_string(),
                 event.agent_id.as_uuid().to_string(),
-                next_seq,
+                first_seq + offset as i64,
                 event.kind.as_db_str(),
                 event.payload.to_string(),
                 created_at,
             ],
         )?;
         ids.push(tx.last_insert_rowid());
-        next_seq += 1;
     }
     tx.commit()?;
     Ok(ids)
@@ -403,7 +442,9 @@ fn mark_interrupted_on_open(conn: &Connection) -> Result<u64, StorageError> {
     Ok(updated as u64)
 }
 
-fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRecord, StorageError>> {
+fn session_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<SessionRecord, StorageError>> {
     Ok((|| {
         let id: String = row.get(0)?;
         let workspace_id: String = row.get(1)?;
@@ -417,19 +458,22 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionR
 
         Ok(SessionRecord {
             id: SessionId::from_uuid(
-                uuid::Uuid::parse_str(&id).map_err(|e| StorageError::InvalidStoredData(format!("session id: {e}")))?,
+                uuid::Uuid::parse_str(&id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("session id: {e}")))?,
             ),
-            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::parse_str(&workspace_id).map_err(|e| {
-                StorageError::InvalidStoredData(format!("workspace id: {e}"))
-            })?),
+            workspace_id: WorkspaceId::from_uuid(
+                uuid::Uuid::parse_str(&workspace_id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("workspace id: {e}")))?,
+            ),
             provider: ProviderId::new(provider),
             transport: TransportId::new(transport),
             model: ModelId::new(model),
             title,
             created_at: parse_time(&created_at)?,
             updated_at: parse_time(&updated_at)?,
-            status: SessionStatus::from_db_str(&status)
-                .ok_or_else(|| StorageError::InvalidStoredData(format!("session status: {status}")))?,
+            status: SessionStatus::from_db_str(&status).ok_or_else(|| {
+                StorageError::InvalidStoredData(format!("session status: {status}"))
+            })?,
         })
     })())
 }
@@ -437,26 +481,39 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionR
 const SESSION_COLUMNS: &str =
     "id, workspace_id, provider, transport, model, title, created_at, updated_at, status";
 
-fn list_sessions(conn: &Connection, workspace_id: Option<WorkspaceId>) -> Result<Vec<SessionRecord>, StorageError> {
+fn list_sessions(
+    conn: &Connection,
+    workspace_id: Option<WorkspaceId>,
+) -> Result<Vec<SessionRecord>, StorageError> {
     match workspace_id {
         Some(workspace_id) => {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions WHERE workspace_id = ?1 ORDER BY created_at"
             ))?;
             let rows = stmt
-                .query_map(params![workspace_id.as_uuid().to_string()], session_from_row)?
+                .query_map(
+                    params![workspace_id.as_uuid().to_string()],
+                    session_from_row,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter().collect()
         }
         None => {
-            let mut stmt = conn.prepare(&format!("SELECT {SESSION_COLUMNS} FROM sessions ORDER BY created_at"))?;
-            let rows = stmt.query_map([], session_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY created_at"
+            ))?;
+            let rows = stmt
+                .query_map([], session_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter().collect()
         }
     }
 }
 
-fn get_session(conn: &Connection, session_id: &SessionId) -> Result<Option<SessionRecord>, StorageError> {
+fn get_session(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<Option<SessionRecord>, StorageError> {
     conn.query_row(
         &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
         params![session_id.as_uuid().to_string()],
@@ -468,7 +525,9 @@ fn get_session(conn: &Connection, session_id: &SessionId) -> Result<Option<Sessi
 
 /// Shared with `crate::storage`'s reader-side queries (paged messages, artifacts) since they read
 /// the same row shapes.
-pub(crate) fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MessageRecord, StorageError>> {
+pub(crate) fn message_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<MessageRecord, StorageError>> {
     Ok((|| {
         let id: i64 = row.get(0)?;
         let session_id: String = row.get(1)?;
@@ -486,10 +545,12 @@ pub(crate) fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resu
         Ok(MessageRecord {
             id,
             session_id: SessionId::from_uuid(
-                uuid::Uuid::parse_str(&session_id).map_err(|e| StorageError::InvalidStoredData(format!("session id: {e}")))?,
+                uuid::Uuid::parse_str(&session_id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("session id: {e}")))?,
             ),
             agent_id: AgentId::from_uuid(
-                uuid::Uuid::parse_str(&agent_id).map_err(|e| StorageError::InvalidStoredData(format!("agent id: {e}")))?,
+                uuid::Uuid::parse_str(&agent_id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("agent id: {e}")))?,
             ),
             turn,
             role,
@@ -511,16 +572,22 @@ pub(crate) fn load_messages(
                 "SELECT id, session_id, agent_id, turn, role, content_json, created_at
                  FROM messages WHERE session_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
             )?;
-            stmt.query_map(params![session_id.as_uuid().to_string(), before_id, limit], message_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            stmt.query_map(
+                params![session_id.as_uuid().to_string(), before_id, limit],
+                message_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
         }
         None => {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, agent_id, turn, role, content_json, created_at
                  FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
             )?;
-            stmt.query_map(params![session_id.as_uuid().to_string(), limit], message_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            stmt.query_map(
+                params![session_id.as_uuid().to_string(), limit],
+                message_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
         }
     };
     let mut out = rows.into_iter().collect::<Result<Vec<_>, StorageError>>()?;
@@ -528,7 +595,10 @@ pub(crate) fn load_messages(
     Ok(out)
 }
 
-pub(crate) fn list_artifacts(conn: &Connection, session_id: &SessionId) -> Result<Vec<ArtifactRecord>, StorageError> {
+pub(crate) fn list_artifacts(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<Vec<ArtifactRecord>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, path, bytes, sha256, kind, created_at
          FROM artifacts WHERE session_id = ?1 ORDER BY id",
@@ -545,9 +615,9 @@ pub(crate) fn list_artifacts(conn: &Connection, session_id: &SessionId) -> Resul
                 let created_at: String = row.get(6)?;
                 Ok(ArtifactRecord {
                     id,
-                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("session id: {e}"))
-                    })?),
+                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(
+                        |e| StorageError::InvalidStoredData(format!("session id: {e}")),
+                    )?),
                     path: std::path::PathBuf::from(path),
                     bytes: bytes as u64,
                     sha256,
@@ -560,7 +630,10 @@ pub(crate) fn list_artifacts(conn: &Connection, session_id: &SessionId) -> Resul
     rows.into_iter().collect()
 }
 
-pub(crate) fn list_tool_calls(conn: &Connection, agent_id: &AgentId) -> Result<Vec<ToolCallRecord>, StorageError> {
+pub(crate) fn list_tool_calls(
+    conn: &Connection,
+    agent_id: &AgentId,
+) -> Result<Vec<ToolCallRecord>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, call_id, name, input_json, status, artifact_id, started_at, finished_at
          FROM tool_calls WHERE agent_id = ?1 ORDER BY id",
@@ -579,15 +652,18 @@ pub(crate) fn list_tool_calls(conn: &Connection, agent_id: &AgentId) -> Result<V
                 let finished_at: Option<String> = row.get(8)?;
                 Ok(ToolCallRecord {
                     id,
-                    agent_id: AgentId::from_uuid(uuid::Uuid::parse_str(&agent_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("agent id: {e}"))
-                    })?),
+                    agent_id: AgentId::from_uuid(
+                        uuid::Uuid::parse_str(&agent_id).map_err(|e| {
+                            StorageError::InvalidStoredData(format!("agent id: {e}"))
+                        })?,
+                    ),
                     call_id: xlightcli_protocol::ToolCallId::new(call_id),
                     name,
                     input: serde_json::from_str(&input_json)
                         .map_err(|e| StorageError::InvalidStoredData(format!("input_json: {e}")))?,
-                    status: ToolCallStatus::from_db_str(&status)
-                        .ok_or_else(|| StorageError::InvalidStoredData(format!("tool_call status: {status}")))?,
+                    status: ToolCallStatus::from_db_str(&status).ok_or_else(|| {
+                        StorageError::InvalidStoredData(format!("tool_call status: {status}"))
+                    })?,
                     artifact_id,
                     started_at: parse_time(&started_at)?,
                     finished_at: finished_at.map(|s| parse_time(&s)).transpose()?,
@@ -598,7 +674,10 @@ pub(crate) fn list_tool_calls(conn: &Connection, agent_id: &AgentId) -> Result<V
     rows.into_iter().collect()
 }
 
-pub(crate) fn list_usage(conn: &Connection, session_id: &SessionId) -> Result<Vec<UsageRecord>, StorageError> {
+pub(crate) fn list_usage(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<Vec<UsageRecord>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, agent_id, transport, model, input_tokens, output_tokens, cached_tokens, at
          FROM provider_usage WHERE session_id = ?1 ORDER BY id",
@@ -617,12 +696,14 @@ pub(crate) fn list_usage(conn: &Connection, session_id: &SessionId) -> Result<Ve
                 let at: String = row.get(8)?;
                 Ok(UsageRecord {
                     id,
-                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("session id: {e}"))
-                    })?),
-                    agent_id: AgentId::from_uuid(uuid::Uuid::parse_str(&agent_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("agent id: {e}"))
-                    })?),
+                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(
+                        |e| StorageError::InvalidStoredData(format!("session id: {e}")),
+                    )?),
+                    agent_id: AgentId::from_uuid(
+                        uuid::Uuid::parse_str(&agent_id).map_err(|e| {
+                            StorageError::InvalidStoredData(format!("agent id: {e}"))
+                        })?,
+                    ),
                     transport: TransportId::new(transport),
                     model: ModelId::new(model),
                     input_tokens: input_tokens as u64,
@@ -636,7 +717,78 @@ pub(crate) fn list_usage(conn: &Connection, session_id: &SessionId) -> Result<Ve
     rows.into_iter().collect()
 }
 
-pub(crate) fn list_events(conn: &Connection, session_id: &SessionId) -> Result<Vec<EventRecord>, StorageError> {
+fn agent_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<crate::records::AgentRecord, StorageError>> {
+    Ok((|| {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let parent_id: Option<String> = row.get(2)?;
+        let profile_json: String = row.get(3)?;
+        let state: String = row.get(4)?;
+        let created_at: String = row.get(5)?;
+        let finished_at: Option<String> = row.get(6)?;
+
+        Ok(crate::records::AgentRecord {
+            id: AgentId::from_uuid(
+                uuid::Uuid::parse_str(&id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("agent id: {e}")))?,
+            ),
+            session_id: SessionId::from_uuid(
+                uuid::Uuid::parse_str(&session_id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("session id: {e}")))?,
+            ),
+            parent_id: parent_id
+                .map(|p| {
+                    uuid::Uuid::parse_str(&p)
+                        .map(AgentId::from_uuid)
+                        .map_err(|e| {
+                            StorageError::InvalidStoredData(format!("parent agent id: {e}"))
+                        })
+                })
+                .transpose()?,
+            profile: serde_json::from_str(&profile_json)
+                .map_err(|e| StorageError::InvalidStoredData(format!("profile_json: {e}")))?,
+            state: AgentState::from_db_str(&state)
+                .ok_or_else(|| StorageError::InvalidStoredData(format!("agent state: {state}")))?,
+            created_at: parse_time(&created_at)?,
+            finished_at: finished_at.map(|s| parse_time(&s)).transpose()?,
+        })
+    })())
+}
+
+pub(crate) fn get_agent(
+    conn: &Connection,
+    agent_id: &AgentId,
+) -> Result<Option<crate::records::AgentRecord>, StorageError> {
+    conn.query_row(
+        "SELECT id, session_id, parent_id, profile_json, state, created_at, finished_at
+         FROM agents WHERE id = ?1",
+        params![agent_id.as_uuid().to_string()],
+        agent_from_row,
+    )
+    .optional()?
+    .transpose()
+}
+
+pub(crate) fn list_agents(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<Vec<crate::records::AgentRecord>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, parent_id, profile_json, state, created_at, finished_at
+         FROM agents WHERE session_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt
+        .query_map(params![session_id.as_uuid().to_string()], agent_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter().collect()
+}
+
+pub(crate) fn list_events(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<Vec<EventRecord>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, agent_id, seq, kind, payload_json, created_at
          FROM events WHERE session_id = ?1 ORDER BY seq",
@@ -653,17 +805,21 @@ pub(crate) fn list_events(conn: &Connection, session_id: &SessionId) -> Result<V
                 let created_at: String = row.get(6)?;
                 Ok(EventRecord {
                     id,
-                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("session id: {e}"))
-                    })?),
-                    agent_id: AgentId::from_uuid(uuid::Uuid::parse_str(&agent_id).map_err(|e| {
-                        StorageError::InvalidStoredData(format!("agent id: {e}"))
-                    })?),
+                    session_id: SessionId::from_uuid(uuid::Uuid::parse_str(&session_id).map_err(
+                        |e| StorageError::InvalidStoredData(format!("session id: {e}")),
+                    )?),
+                    agent_id: AgentId::from_uuid(
+                        uuid::Uuid::parse_str(&agent_id).map_err(|e| {
+                            StorageError::InvalidStoredData(format!("agent id: {e}"))
+                        })?,
+                    ),
                     seq,
-                    kind: StoredEventKind::from_db_str(&kind)
-                        .ok_or_else(|| StorageError::InvalidStoredData(format!("event kind: {kind}")))?,
-                    payload: serde_json::from_str(&payload_json)
-                        .map_err(|e| StorageError::InvalidStoredData(format!("payload_json: {e}")))?,
+                    kind: StoredEventKind::from_db_str(&kind).ok_or_else(|| {
+                        StorageError::InvalidStoredData(format!("event kind: {kind}"))
+                    })?,
+                    payload: serde_json::from_str(&payload_json).map_err(|e| {
+                        StorageError::InvalidStoredData(format!("payload_json: {e}"))
+                    })?,
                     created_at: parse_time(&created_at)?,
                 })
             })())
@@ -673,7 +829,9 @@ pub(crate) fn list_events(conn: &Connection, session_id: &SessionId) -> Result<V
 }
 
 #[allow(dead_code)] // kept for symmetry / Wave B use; not every accessor is exercised by Wave A tests
-pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<WorkspaceRecord, StorageError>> {
+pub(crate) fn workspace_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<WorkspaceRecord, StorageError>> {
     Ok((|| {
         let id: String = row.get(0)?;
         let root: String = row.get(1)?;
@@ -681,7 +839,8 @@ pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Re
         let created_at: String = row.get(3)?;
         Ok(WorkspaceRecord {
             id: WorkspaceId::from_uuid(
-                uuid::Uuid::parse_str(&id).map_err(|e| StorageError::InvalidStoredData(format!("workspace id: {e}")))?,
+                uuid::Uuid::parse_str(&id)
+                    .map_err(|e| StorageError::InvalidStoredData(format!("workspace id: {e}")))?,
             ),
             root: std::path::PathBuf::from(root),
             repo_id,

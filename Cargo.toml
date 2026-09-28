@@ -94,8 +94,35 @@ time = { version = "0.3.55", features = ["serde-well-known", "formatting", "pars
 clap = { version = "4.6.7", features = ["derive"] }
 open = "5.4.4"
 
+# --- TUI (Phase 1, Wave A addition: ratatui + crossterm, D-005) ---
+ratatui = "0.29.0"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+
+# --- tools: fs search, diff, process groups (Phase 1, Wave A addition) ---
+# `ignore`/`globset`/`grep-*`: gitignore-aware walk + glob + grep as libraries (D-013 — never
+# spawn `rg`). `similar`: diff rendering (`core.diff`, docs/PLAN.md §7.2). `rustix`: process-group
+# management for `ProcessLauncher` (PATTERNS.md §8) without blocking a future Windows port (D-003)
+# — preferred over `nix` for its narrower, capability-based API surface and Windows stub support.
+# `tokio-stream`/`indexmap`: general async-stream and order-preserving-map utilities used by
+# `tools`/`runtime`.
+ignore = "0.4.23"
+globset = "0.4.16"
+grep-searcher = "0.1.14"
+grep-regex = "0.1.13"
+grep-matcher = "0.1.7"
+similar = "2.7.0"
+# Lightweight regex engine (no external Unicode tables, MIT/Apache-2.0) for the `regex:<pattern>`
+# permission-rule target syntax (docs/PLAN.md §7.3) — deliberately not the full `regex` crate,
+# consistent with the "avoid heavy deps" guidance for this wave.
+regex-lite = "0.1.6"
+rustix = { version = "1.1.5", features = ["process"] }
+tokio-stream = "0.1.17"
+indexmap = "2.7.0"
+
 # --- dev / test only ---
 insta = { version = "1.48.0", features = ["yaml", "json"] }
 wiremock = "0.6.5"
 tempfile = "3.27.0"
 pretty_assertions = "1.4.1"
+# End-to-end CLI testing for `xlightcli exec` (Wave A addition, `crates/app/tests`).
+assert_cmd = "2.0.16"

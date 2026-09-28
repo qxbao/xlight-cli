@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Clap CLI surface (docs/PLAN.md §18.3). Phase 0 implements `dev probe`, `auth
-//! {list,login,logout,import}`, and `provider {list,info}`; `init`/`exec`/`config` and the bare
-//! TUI land in later phases.
+//! Clap CLI surface (docs/PLAN.md §18.3). Phase 0 implemented `dev probe`, `auth
+//! {list,login,logout,import}`, and `provider {list,info}`. Phase 1 Wave A adds the `exec`
+//! headless surface (D-026, docs/commands.md §5) and an `init` stub; `config` and a real bare TUI
+//! (today: a thin wrapper around `xlightcli_tui::run`) round out docs/PLAN.md §18.3.
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -38,6 +41,80 @@ pub enum Command {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    /// Headless prompt execution (docs/PLAN.md §9.3, §18.3; docs/commands.md §5; D-026).
+    Exec(ExecArgs),
+    /// Interactive setup wizard (docs/PLAN.md §18.1). Stub — Phase 1 Wave B.
+    Init,
+}
+
+/// `--output-format` (docs/commands.md §5), mapped to `xlightcli_runtime::ExecOutputFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ExecOutputFormatArg {
+    Text,
+    Json,
+    StreamJson,
+}
+
+impl From<ExecOutputFormatArg> for xlightcli_runtime::ExecOutputFormat {
+    fn from(value: ExecOutputFormatArg) -> Self {
+        match value {
+            ExecOutputFormatArg::Text => Self::Text,
+            ExecOutputFormatArg::Json => Self::Json,
+            ExecOutputFormatArg::StreamJson => Self::StreamJson,
+        }
+    }
+}
+
+/// `xlightcli exec` flags (D-026, docs/commands.md §5 — kept compatible with agy's/Claude Code's
+/// print-mode flags). Exactly one of `--print`/the positional `prompt` must be given; that's
+/// validated in `cmd::exec::dispatch` rather than with clap groups, so the error message can be a
+/// normal `CliError::invalid_input` (exit code 2, docs/PLAN.md §18.3) instead of clap's own usage
+/// error.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ExecArgs {
+    /// `-p`/`--print "<prompt>"` (agy, Claude Code compatibility).
+    #[arg(short = 'p', long = "print")]
+    pub print: Option<String>,
+
+    /// Positional prompt, used when `--print` isn't given.
+    pub prompt: Option<String>,
+
+    #[arg(long = "output-format", value_enum, default_value_t = ExecOutputFormatArg::Text)]
+    pub output_format: ExecOutputFormatArg,
+
+    #[arg(long)]
+    pub model: Option<String>,
+
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    #[arg(long)]
+    pub transport: Option<String>,
+
+    /// Execution mode: `default` | `accept-edits` | `plan`.
+    #[arg(long)]
+    pub mode: Option<String>,
+
+    /// `-c`/`--continue`: continue the most recent session in this workspace.
+    #[arg(short = 'c', long = "continue")]
+    pub continue_session: bool,
+
+    /// `--resume <id>`.
+    #[arg(long)]
+    pub resume: Option<String>,
+
+    /// Requires workspace trust + a global opt-in (docs/commands.md §5); enforcing that is Wave B.
+    #[arg(long)]
+    pub dangerously_skip_permissions: bool,
+
+    /// `--add-dir`, repeatable.
+    #[arg(long)]
+    pub add_dir: Vec<PathBuf>,
+
+    /// `--print-timeout`, seconds (default 5 minutes, docs/commands.md §5).
+    #[arg(long)]
+    pub print_timeout: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]

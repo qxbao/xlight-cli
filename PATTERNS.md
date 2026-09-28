@@ -199,66 +199,69 @@ impl Tool for ReadFile {
     async fn run(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
         let args: ReadFileArgs = serde_json::from_value(input).map_err(ToolError::invalid_input)?;
         let path = ctx.workspace.resolve(&args.path)?;          // block paths escaping the workspace
-        ctx.permissions.check(ToolAction::Read(&path)).await?;  // may open a dialog
-        // stream the file into ctx.spool if large; don't read_to_string an entire huge file
+        ctx.check_permission(PermissionAction::ReadFile(&path)).await?;  // may open a dialog
+        // stream the file into a fresh ctx.open_spool().await? if large; don't read_to_string an
+        // entire huge file
         ...
     }
 }
 ```
 
 - Input is parsed with a `serde` struct that has `#[serde(deny_unknown_fields)]`; the JSON schema for the model is generated from the same struct (`schemars`).
-- Paths always go through `workspace.resolve()` (canonicalize, block `..`/symlink escaping the root).
-- Permission check happens **before** the side effect, inside the tool, not just in the executor.
+- Paths always go through `workspace.resolve()`. **Phase 1 Wave A scope decision:** `resolve()` is lexical only (join + collapse `.`/`..`, then the result must still `start_with` the root) — it does not yet canonicalize existing ancestors to catch a symlink escape; that's a Wave B addition.
+- Permission check happens **before** the side effect, inside the tool, not just in the executor (`ctx.check_permission(action)`, a thin wrapper over `ctx.permissions.check(action)`).
 - A tool never receives credentials and never spawns a process itself (uses `ctx.launcher`).
 
 ## 8. Process spawning (INV-1)
 
 ```rust
-let child = ctx.launcher.spawn(SpawnSpec {
+let process = ctx.launcher.spawn(SpawnSpec {
     purpose: SpawnPurpose::ShellTool,
     program: "bash".into(),
     args: vec!["-lc".into(), command],
     cwd: ctx.workspace.root().to_owned(),
-    env: EnvPolicy::Scrubbed { passthrough: ctx.config.env_passthrough.clone() },
-    timeout: Some(args.timeout.unwrap_or(DEFAULT_SHELL_TIMEOUT)),
+    env: EnvPolicy::Scrubbed { passthrough: config.tools.env_passthrough.clone() },
+    timeout: Some(args.timeout_secs.map(Duration::from_secs).unwrap_or(DEFAULT_SHELL_TIMEOUT)),
     cancel: ctx.cancel.clone(),
 }).await?;
-let output = child.pipe_into(&ctx.spool).await?;
+let mut spool = ctx.open_spool().await?;
+let status = process.pipe_into(&mut spool).await?;   // kills the whole process group on timeout/cancel
+let summary = spool.finish().await?;
 ```
 
-- `ProcessLauncher` creates its own process group, killing the whole group on timeout/cancel.
-- `SpawnPurpose::{Mcp, Hook, Git}` with a program basename on the provider-CLI blocklist ⇒ `SpawnError::ForbiddenProgram`.
-- `EnvPolicy::Scrubbed` is the default; there is no "inherit the whole environment" API for MCP/hooks.
+- `ProcessLauncher` puts every child in its own process group (`tokio::process::Command::process_group(0)`, safe/stable — no `unsafe` needed, honoring `[workspace.lints.rust] unsafe_code = "forbid"`); `SpawnedProcess::pipe_into` kills the **whole group** (`rustix::process::kill_process_group`, also safe) on timeout/cancel.
+- `SpawnPurpose::{Mcp, Hook, Git}` with a program basename on the provider-CLI blocklist ⇒ `SpawnError::ForbiddenProgram`. `SpawnPurpose::ShellTool` is **not** blocklist-checked (the program is always `bash`; the blocklist can't meaningfully filter arbitrary shell text) — the shell tool's own permission rule (`PermissionAction::Command`) is the gate there.
+- `EnvPolicy::Scrubbed` is the only variant; there is no "inherit the whole environment" API for MCP/hooks/shell.
 
 ## 9. Output spooling (INV-7)
 
 ```rust
-let spool = OutputSpool::create(&artifacts, session_id, call_id, SpoolLimits {
+let mut spool = OutputSpool::create(&artifacts_dir, session_id, call_id, SpoolLimits {
     head_bytes: 8 * 1024,
     tail_bytes: 32 * 1024,
-})?;
-// writer: every byte → file; head keeps the first N bytes; tail is a ring buffer
+}).await?;
+spool.write_chunk(chunk).await?;   // every byte → artifact file; head keeps the first N bytes; tail is a ring buffer
 let summary: SpooledOutput = spool.finish().await?;
 // summary = { head, tail, total_bytes, total_lines, truncated, artifact: ArtifactRef }
 ```
 
-The model receives `summary` (not the full output). The TUI shows the tail + a link to open the artifact.
+The model receives `summary` (not the full output) — `ToolOutput::Spooled(summary).model_facing_text()` renders exactly the head+tail+counts, never the full bytes. The TUI shows the tail + a link to open the artifact.
 
 ## 10. Persistence
 
 - Only the **writer thread** holds the write connection; other code sends a `StorageCmd` over a bounded channel and (if needed) receives an ack via `oneshot`.
-- Events are appended in batches (N events or 50 ms). `TextDelta` is coalesced by chunk before writing.
-- The reader uses its own read-only connection (WAL allows concurrent reads).
+- `Storage::append_events` batches all rows of **one call** into a single sqlite transaction (assigning each a per-session-monotonic `seq`). **Phase 1 Wave A scope decision:** the writer thread does not additionally coalesce *several distinct* `StorageCmd`s (e.g. from different agents) that arrive close together into one shared transaction — a pure writer-thread implementation detail Wave B can add without changing `StorageCmd` or `Storage`'s public API. `TextDelta` coalescing by chunk is the caller's job before it ever calls `append_events`.
+- The reader uses its own read-only-in-practice connection (a second, independent connection to the same WAL-mode file; PATTERNS.md doesn't require sqlite's `mode=ro` URI flag, just a separate handle) — `list_events`/`load_messages`/`list_tool_calls`/`list_artifacts`/`list_usage`/`list_agents` all go through it, never the writer thread.
 - Migrations only add (`NNNN_description.sql`), never edit an already-merged migration.
 - The JSON payload in the DB is the canonical `protocol` type (serde), **not** the provider's wire JSON.
 - No column ever holds a secret; `accounts.keyring_ref` is just a keyring lookup key.
 
 ## 11. Config
 
-- Each layer deserializes into a `PartialConfig` (every field `Option`), layers are merged in order, then `resolve()` produces the full `Config` with defaults.
-- Merge: tables deep-merge; scalars are overwritten; arrays are replaced. Record the source of each key (`Origin`) for `config show --origin`.
-- Sensitive keys (hooks, MCP stdio, exec allow rules, permission mode > ask, `[experimental]`, env passthrough) are ignored from the project layer when the workspace isn't trusted — handled in `config::trust`, with tests.
-- `[experimental]` is only read from the global layer.
+- Each layer deserializes into a `PartialConfig` (every field `Option`), layers are merged in order (`config::merge::merge`), then `resolve()` produces the full `Config` with defaults. `config::loader::ConfigLoader` orchestrates the full layer order (defaults → global → project → project.local → env → CLI).
+- Merge: tables deep-merge; scalars are overwritten; arrays are replaced. Record the source of each key (`Origin`) for `config show --origin` — **Phase 1 Wave A scope decision:** `Origin` is tracked at top-level *section* granularity (`tools`, `permissions`, ...), not per leaf key; refine in `config::origin` if `config show --origin` needs leaf-level precision.
+- Sensitive keys (permission mode > ask, an `allow` rule for `command`/`unsandboxed`, env passthrough) are ignored from the project/project.local layer when the workspace isn't trusted — handled in `config::trust::filter_untrusted`, with tests. Hooks/MCP-stdio config keys aren't part of the schema yet (Phase 3+); nothing to strip there today.
+- `[experimental]` is only read from the global layer (stripped unconditionally from project/project.local, independent of trust).
 
 ## 12. Commands
 

@@ -59,15 +59,21 @@ impl Storage {
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let path = path.into();
         let write_path = path.clone();
-        let write_conn = tokio::task::spawn_blocking(move || crate::db::open_and_migrate(&write_path)).await??;
+        let write_conn =
+            tokio::task::spawn_blocking(move || crate::db::open_and_migrate(&write_path)).await??;
         let read_path = path.clone();
-        let reader_conn = tokio::task::spawn_blocking(move || crate::db::open_reader(&read_path)).await??;
+        let reader_conn =
+            tokio::task::spawn_blocking(move || crate::db::open_reader(&read_path)).await??;
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         std::thread::Builder::new()
             .name("xlightcli-storage-writer".to_string())
             .spawn(move || worker::run(write_conn, rx))
-            .map_err(|e| StorageError::InvalidStoredData(format!("failed to spawn storage writer thread: {e}")))?;
+            .map_err(|e| {
+                StorageError::InvalidStoredData(format!(
+                    "failed to spawn storage writer thread: {e}"
+                ))
+            })?;
 
         let storage = Self {
             cmd_tx: tx,
@@ -77,22 +83,13 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Test-only constructor. A true `:memory:` database can't be shared between the writer and
+    /// reader connections (each `:memory:` handle is its own independent, private database), so
+    /// this opens a real (temp-file-backed) database instead — the only way for both connections
+    /// to see the same data, matching how `Self::open` is actually used in production.
     #[cfg(test)]
-    async fn open_in_memory() -> Result<Self, StorageError> {
-        // Two independent in-memory connections would be two independent (empty) databases, so
-        // the reader side of an in-memory `Storage` intentionally isn't exercised by tests —
-        // `open_in_memory` exists only for the writer-side unit tests in this module.
-        let write_conn = tokio::task::spawn_blocking(crate::db::open_in_memory_and_migrate).await??;
-        let reader_conn = tokio::task::spawn_blocking(crate::db::open_in_memory_and_migrate).await??;
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        std::thread::Builder::new()
-            .name("xlightcli-storage-writer-test".to_string())
-            .spawn(move || worker::run(write_conn, rx))
-            .map_err(|e| StorageError::InvalidStoredData(format!("failed to spawn storage writer thread: {e}")))?;
-        Ok(Self {
-            cmd_tx: tx,
-            reader: Arc::new(Mutex::new(reader_conn)),
-        })
+    async fn open_test(dir: &std::path::Path) -> Result<Self, StorageError> {
+        Self::open(dir.join("test.db")).await
     }
 
     async fn call<T, F>(&self, build: F) -> Result<T, StorageError>
@@ -105,7 +102,9 @@ impl Storage {
             .send(build(reply_tx))
             .await
             .map_err(|_| StorageError::WriterUnavailable)?;
-        reply_rx.await.map_err(|_| StorageError::WriterUnavailable)?
+        reply_rx
+            .await
+            .map_err(|_| StorageError::WriterUnavailable)?
     }
 
     async fn with_reader<T, F>(&self, f: F) -> Result<T, StorageError>
@@ -123,8 +122,17 @@ impl Storage {
 
     // --- workspaces / sessions ---------------------------------------------------------------
 
-    pub async fn create_workspace(&self, root: PathBuf, repo_id: Option<String>) -> Result<WorkspaceId, StorageError> {
-        self.call(|reply| StorageCmd::CreateWorkspace { root, repo_id, reply }).await
+    pub async fn create_workspace(
+        &self,
+        root: PathBuf,
+        repo_id: Option<String>,
+    ) -> Result<WorkspaceId, StorageError> {
+        self.call(|reply| StorageCmd::CreateWorkspace {
+            root,
+            repo_id,
+            reply,
+        })
+        .await
     }
 
     pub async fn create_session(
@@ -146,22 +154,43 @@ impl Storage {
         .await
     }
 
-    pub async fn list_sessions(&self, workspace_id: Option<WorkspaceId>) -> Result<Vec<SessionRecord>, StorageError> {
-        self.call(|reply| StorageCmd::ListSessions { workspace_id, reply }).await
+    pub async fn list_sessions(
+        &self,
+        workspace_id: Option<WorkspaceId>,
+    ) -> Result<Vec<SessionRecord>, StorageError> {
+        self.call(|reply| StorageCmd::ListSessions {
+            workspace_id,
+            reply,
+        })
+        .await
     }
 
-    pub async fn get_session(&self, session_id: SessionId) -> Result<Option<SessionRecord>, StorageError> {
-        self.call(|reply| StorageCmd::GetSession { session_id, reply }).await
+    pub async fn get_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionRecord>, StorageError> {
+        self.call(|reply| StorageCmd::GetSession { session_id, reply })
+            .await
     }
 
-    pub async fn update_session_status(&self, session_id: SessionId, status: SessionStatus) -> Result<(), StorageError> {
-        self.call(|reply| StorageCmd::UpdateSessionStatus { session_id, status, reply }).await
+    pub async fn update_session_status(
+        &self,
+        session_id: SessionId,
+        status: SessionStatus,
+    ) -> Result<(), StorageError> {
+        self.call(|reply| StorageCmd::UpdateSessionStatus {
+            session_id,
+            status,
+            reply,
+        })
+        .await
     }
 
     /// Marks every `active` session `interrupted` (docs/PLAN.md §11.2). Called automatically by
     /// [`Self::open`]; exposed so tests (and `core.status`/diagnostics) can call it explicitly.
     pub async fn mark_interrupted_on_open(&self) -> Result<u64, StorageError> {
-        self.call(|reply| StorageCmd::MarkInterruptedOnOpen { reply }).await
+        self.call(|reply| StorageCmd::MarkInterruptedOnOpen { reply })
+            .await
     }
 
     // --- agents --------------------------------------------------------------------------------
@@ -181,16 +210,45 @@ impl Storage {
         .await
     }
 
+    pub async fn get_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<crate::records::AgentRecord>, StorageError> {
+        self.with_reader(move |conn| worker::get_agent(conn, &agent_id))
+            .await
+    }
+
+    pub async fn list_agents(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<crate::records::AgentRecord>, StorageError> {
+        self.with_reader(move |conn| worker::list_agents(conn, &session_id))
+            .await
+    }
+
     // --- events / messages -----------------------------------------------------------------
 
     /// Appends `events` to the append-only log in one atomic batch, assigning each a
     /// per-session-monotonic `seq`. Returns the surrogate row id of each inserted event, in order.
-    pub async fn append_events(&self, session_id: SessionId, events: Vec<NewEvent>) -> Result<Vec<i64>, StorageError> {
-        self.call(|reply| StorageCmd::AppendEvents { session_id, events, reply }).await
+    pub async fn append_events(
+        &self,
+        session_id: SessionId,
+        events: Vec<NewEvent>,
+    ) -> Result<Vec<i64>, StorageError> {
+        self.call(|reply| StorageCmd::AppendEvents {
+            session_id,
+            events,
+            reply,
+        })
+        .await
     }
 
-    pub async fn list_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>, StorageError> {
-        self.with_reader(move |conn| worker::list_events(conn, &session_id)).await
+    pub async fn list_events(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<EventRecord>, StorageError> {
+        self.with_reader(move |conn| worker::list_events(conn, &session_id))
+            .await
     }
 
     /// Appends one row to the `messages` projection (see the module doc for the Wave A scope
@@ -217,14 +275,20 @@ impl Storage {
     /// Loads up to `page.limit` messages older than `page.before_id` (or the most recent
     /// `page.limit` when `before_id` is `None`), oldest-first — the shape `ContextManager` needs
     /// to lazily page in history (docs/PLAN.md §9.2).
-    pub async fn load_messages(&self, session_id: SessionId, page: MessagePage) -> Result<Vec<MessageRecord>, StorageError> {
-        self.with_reader(move |conn| worker::load_messages(conn, &session_id, page)).await
+    pub async fn load_messages(
+        &self,
+        session_id: SessionId,
+        page: MessagePage,
+    ) -> Result<Vec<MessageRecord>, StorageError> {
+        self.with_reader(move |conn| worker::load_messages(conn, &session_id, page))
+            .await
     }
 
     // --- tool calls ----------------------------------------------------------------------------
 
     pub async fn record_tool_call(&self, call: NewToolCall) -> Result<i64, StorageError> {
-        self.call(|reply| StorageCmd::RecordToolCall { call, reply }).await
+        self.call(|reply| StorageCmd::RecordToolCall { call, reply })
+            .await
     }
 
     pub async fn finish_tool_call(
@@ -233,31 +297,51 @@ impl Storage {
         status: ToolCallStatus,
         artifact_id: Option<i64>,
     ) -> Result<(), StorageError> {
-        self.call(|reply| StorageCmd::FinishToolCall { id, status, artifact_id, reply }).await
+        self.call(|reply| StorageCmd::FinishToolCall {
+            id,
+            status,
+            artifact_id,
+            reply,
+        })
+        .await
     }
 
-    pub async fn list_tool_calls(&self, agent_id: AgentId) -> Result<Vec<ToolCallRecord>, StorageError> {
-        self.with_reader(move |conn| worker::list_tool_calls(conn, &agent_id)).await
+    pub async fn list_tool_calls(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<ToolCallRecord>, StorageError> {
+        self.with_reader(move |conn| worker::list_tool_calls(conn, &agent_id))
+            .await
     }
 
     // --- artifacts -----------------------------------------------------------------------------
 
     pub async fn register_artifact(&self, artifact: NewArtifact) -> Result<i64, StorageError> {
-        self.call(|reply| StorageCmd::RegisterArtifact { artifact, reply }).await
+        self.call(|reply| StorageCmd::RegisterArtifact { artifact, reply })
+            .await
     }
 
-    pub async fn list_artifacts(&self, session_id: SessionId) -> Result<Vec<ArtifactRecord>, StorageError> {
-        self.with_reader(move |conn| worker::list_artifacts(conn, &session_id)).await
+    pub async fn list_artifacts(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<ArtifactRecord>, StorageError> {
+        self.with_reader(move |conn| worker::list_artifacts(conn, &session_id))
+            .await
     }
 
     // --- usage ---------------------------------------------------------------------------------
 
     pub async fn record_usage(&self, row: NewUsageRow) -> Result<i64, StorageError> {
-        self.call(|reply| StorageCmd::RecordUsage { row, reply }).await
+        self.call(|reply| StorageCmd::RecordUsage { row, reply })
+            .await
     }
 
-    pub async fn list_usage(&self, session_id: SessionId) -> Result<Vec<UsageRecord>, StorageError> {
-        self.with_reader(move |conn| worker::list_usage(conn, &session_id)).await
+    pub async fn list_usage(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<UsageRecord>, StorageError> {
+        self.with_reader(move |conn| worker::list_usage(conn, &session_id))
+            .await
     }
 }
 
@@ -279,7 +363,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(
-                workspace.clone(),
+                workspace,
                 ProviderId::new("codex"),
                 TransportId::new("chatgpt"),
                 ModelId::new("gpt-5"),
@@ -288,7 +372,7 @@ mod tests {
             .await
             .unwrap();
         let agent = storage
-            .register_agent(session.clone(), None, json!({"provider": "codex"}))
+            .register_agent(session, None, json!({"provider": "codex"}))
             .await
             .unwrap();
         (workspace, session, agent)
@@ -296,10 +380,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_list_get_session_roundtrip() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (workspace, session, _agent) = sample_session(&storage).await;
 
-        let fetched = storage.get_session(session.clone()).await.unwrap().unwrap();
+        let fetched = storage.get_session(session).await.unwrap().unwrap();
         assert_eq!(fetched.id, session);
         assert_eq!(fetched.workspace_id, workspace);
         assert_eq!(fetched.status, SessionStatus::Active);
@@ -311,28 +396,36 @@ mod tests {
 
     #[tokio::test]
     async fn get_missing_session_is_none() {
-        let storage = Storage::open_in_memory().await.unwrap();
-        assert!(storage.get_session(SessionId::new()).await.unwrap().is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
+        assert!(
+            storage
+                .get_session(SessionId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn append_events_assigns_monotonic_seq() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, agent) = sample_session(&storage).await;
 
         let events = vec![
             NewEvent {
-                agent_id: agent.clone(),
+                agent_id: agent,
                 kind: StoredEventKind::TurnStarted,
                 payload: json!({"model": "gpt-5"}),
             },
             NewEvent {
-                agent_id: agent.clone(),
+                agent_id: agent,
                 kind: StoredEventKind::TextDelta,
                 payload: json!({"index": 0, "text": "hi"}),
             },
         ];
-        let ids = storage.append_events(session.clone(), events).await.unwrap();
+        let ids = storage.append_events(session, events).await.unwrap();
         assert_eq!(ids.len(), 2);
 
         let stored = storage.list_events(session).await.unwrap();
@@ -344,19 +437,32 @@ mod tests {
 
     #[tokio::test]
     async fn append_message_and_load_messages_orders_oldest_first() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, agent) = sample_session(&storage).await;
 
         storage
-            .append_message(session.clone(), agent.clone(), 1, Role::User, vec![ContentBlock::Text {
-                text: "hello".to_string(),
-            }])
+            .append_message(
+                session,
+                agent,
+                1,
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            )
             .await
             .unwrap();
         storage
-            .append_message(session.clone(), agent.clone(), 1, Role::Assistant, vec![ContentBlock::Text {
-                text: "hi there".to_string(),
-            }])
+            .append_message(
+                session,
+                agent,
+                1,
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "hi there".to_string(),
+                }],
+            )
             .await
             .unwrap();
 
@@ -371,19 +477,32 @@ mod tests {
 
     #[tokio::test]
     async fn load_messages_pages_with_before_id() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, agent) = sample_session(&storage).await;
         for i in 0..5 {
             storage
-                .append_message(session.clone(), agent.clone(), i, Role::User, vec![ContentBlock::Text {
-                    text: format!("message {i}"),
-                }])
+                .append_message(
+                    session,
+                    agent,
+                    i,
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: format!("message {i}"),
+                    }],
+                )
                 .await
                 .unwrap();
         }
 
         let first_page = storage
-            .load_messages(session.clone(), MessagePage { before_id: None, limit: 2 })
+            .load_messages(
+                session,
+                MessagePage {
+                    before_id: None,
+                    limit: 2,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(first_page.len(), 2);
@@ -408,12 +527,13 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_lifecycle() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, agent) = sample_session(&storage).await;
 
         let id = storage
             .record_tool_call(NewToolCall {
-                agent_id: agent.clone(),
+                agent_id: agent,
                 call_id: ToolCallId::new("call-1"),
                 name: "read_file".to_string(),
                 input: json!({"path": "README.md"}),
@@ -423,7 +543,7 @@ mod tests {
 
         let artifact_id = storage
             .register_artifact(NewArtifact {
-                session_id: session.clone(),
+                session_id: session,
                 path: PathBuf::from("/artifacts/call-1.log"),
                 bytes: 42,
                 sha256: "deadbeef".to_string(),
@@ -449,12 +569,13 @@ mod tests {
 
     #[tokio::test]
     async fn usage_rows_are_recorded_and_listed() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, agent) = sample_session(&storage).await;
 
         storage
             .record_usage(NewUsageRow {
-                session_id: session.clone(),
+                session_id: session,
                 agent_id: agent,
                 transport: TransportId::new("chatgpt"),
                 model: ModelId::new("gpt-5"),
@@ -476,7 +597,8 @@ mod tests {
 
     #[tokio::test]
     async fn mark_interrupted_on_open_flips_active_sessions() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_test(dir.path()).await.unwrap();
         let (_workspace, session, _agent) = sample_session(&storage).await;
 
         let flipped = storage.mark_interrupted_on_open().await.unwrap();

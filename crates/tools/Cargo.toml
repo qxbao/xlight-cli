@@ -4,7 +4,11 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 rust-version.workspace = true
-description = "Tool trait, ToolRegistry, PermissionEngine, ProcessLauncher, OutputSpool (Phase 1 skeleton)"
+description = "Tool trait, ToolRegistry, PermissionEngine, ProcessLauncher, OutputSpool (Phase 1)"
+
+[features]
+# Enables PermissionGate/ToolContext test helpers (AllowAllGate, InMemory launcher fixtures, ...).
+testing = []
 
 [lints]
 workspace = true
@@ -15,7 +19,25 @@ xlightcli-config = { workspace = true }
 xlightcli-storage = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-matcher = { workspace = true }
+similar = { workspace = true }
+indexmap = { workspace = true }
+regex-lite = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }

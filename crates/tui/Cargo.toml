@@ -4,7 +4,7 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 rust-version.workspace = true
-description = "ratatui + crossterm terminal UI, talks only to RuntimeHandle (Phase 1 skeleton)"
+description = "ratatui + crossterm terminal UI, talks only to RuntimeHandle (Phase 1)"
 
 [lints]
 workspace = true
@@ -14,3 +14,14 @@ xlightcli-protocol = { workspace = true }
 xlightcli-config = { workspace = true }
 xlightcli-runtime = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+[dev-dependencies]
+xlightcli-runtime = { workspace = true, features = ["testing"] }
+xlightcli-storage = { workspace = true }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }

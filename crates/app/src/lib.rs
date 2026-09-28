@@ -4,8 +4,10 @@
 //! command implementations. `src/main.rs` is a thin wrapper around [`run`] — splitting it this
 //! way lets `crates/app/tests/*.rs` exercise the CLI in-process instead of spawning a subprocess.
 //!
-//! **Status: Phase 0.** `dev probe`, `auth {list,login,logout,import}`, and `provider {list,info}`
-//! are implemented; `init`/`exec`/`config` and the bare TUI (docs/PLAN.md §18.3) are later phases.
+//! **Status: Phase 1 Wave A.** `dev probe`, `auth {list,login,logout,import}`, `provider
+//! {list,info}` (Phase 0) plus `exec` and a bare-TUI entry point (docs/PLAN.md §18.3) now parse
+//! and wire up correctly; `exec`'s turn execution and `init`'s wizard are Wave B stubs (see
+//! `cmd::exec`/`cmd::init`). `config` still doesn't exist as a CLI subcommand.
 
 pub mod cli;
 pub mod cmd;
@@ -91,9 +93,21 @@ async fn execute(cli: &Cli, ctx: &AppContext) -> Result<(), CliError> {
         }
         Some(Command::Auth { command }) => cmd::auth::dispatch(ctx, command).await,
         Some(Command::Provider { command }) => cmd::provider::dispatch(ctx, command),
-        None => Err(CliError::other(
-            "xlightcli TUI is not implemented yet (Phase 1); try `xlightcli dev probe <provider> \
-             \"<prompt>\"`",
-        )),
+        Some(Command::Exec(args)) => cmd::exec::dispatch(args).await,
+        Some(Command::Init) => cmd::init::dispatch().await,
+        // `Exec`/`Init`/the bare TUI don't need `ctx` (the Phase-0 `AppContext`): they build their
+        // own runtime-backed `wiring::RuntimeContext` (storage + tools + a fresh provider/auth
+        // wiring), independent of whatever `ctx` the caller already built. Registering providers
+        // twice in the same process is harmless (two independent, unused-elsewhere registries) —
+        // a documented Wave A simplification rather than threading a second wiring path through
+        // every existing call site's signature.
+        None => {
+            let runtime = wiring::build_runtime()
+                .await
+                .map_err(|e| CliError::other(format!("failed to open storage: {e}")))?;
+            xlightcli_tui::run(runtime.handle, xlightcli_tui::TuiOptions::default())
+                .await
+                .map_err(|e| CliError::other(e.to_string()))
+        }
     }
 }

@@ -147,3 +147,40 @@ pub async fn build() -> AppContext {
 
     AppContext { auth, providers }
 }
+
+/// Everything the runtime-backed surfaces (`exec`, the bare TUI) need — built on top of
+/// [`AppContext`]'s provider/auth wiring plus `xlightcli-storage`/`xlightcli-tools`, which
+/// `dev`/`auth`/`provider` never touch (kept as a separate entry point so `build()`'s existing
+/// callers/tests are unaffected, docs/CONTRACTS.md §7 Wave A brief: "keep all existing commands
+/// working").
+#[derive(Debug)]
+pub struct RuntimeContext {
+    pub handle: xlightcli_runtime::RuntimeHandle,
+}
+
+/// Builds a [`RuntimeContext`]: reuses [`build`]'s provider/auth wiring, opens the real
+/// `xlightcli-storage` database (`xlightcli_config::paths::database_path()`), and registers the
+/// full built-in tool set (`xlightcli_tools::ToolRegistry::with_builtins()`).
+pub async fn build_runtime() -> Result<RuntimeContext, xlightcli_storage::StorageError> {
+    build_runtime_at(xlightcli_config::paths::database_path()).await
+}
+
+/// Same as [`build_runtime`], but opens the storage database at an explicit `db_path` instead of
+/// the real XDG data dir — the seam integration tests use so they don't touch the real home
+/// directory (mirrors `AppContext`'s existing test seam).
+pub async fn build_runtime_at(
+    db_path: std::path::PathBuf,
+) -> Result<RuntimeContext, xlightcli_storage::StorageError> {
+    let app_ctx = build().await;
+    let storage = xlightcli_storage::Storage::open(db_path).await?;
+    let deps = xlightcli_runtime::RuntimeDeps {
+        providers: Arc::new(app_ctx.providers),
+        auth: Arc::new(app_ctx.auth),
+        tools: Arc::new(xlightcli_tools::ToolRegistry::with_builtins()),
+        storage,
+        config: xlightcli_config::Config::default(),
+    };
+    let handle =
+        xlightcli_runtime::RuntimeHandle::new(deps, xlightcli_runtime::RuntimeConfig::default());
+    Ok(RuntimeContext { handle })
+}

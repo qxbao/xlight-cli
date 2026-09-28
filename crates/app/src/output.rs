@@ -112,6 +112,22 @@ pub fn render_event(event: &AgentEvent) -> bool {
     }
 }
 
+/// `xlightcli exec --output-format text`: just the response text (docs/commands.md §5), no
+/// wrapper — so `xlightcli exec -p "..."  | some-pipe` sees only the answer.
+pub fn exec_text(response: &str) {
+    println!("{response}");
+}
+
+/// `xlightcli exec --output-format json` (and, until Wave B adds real incremental streaming,
+/// `stream-json` too): the `{conversation_id, status, response, usage}` shape from
+/// docs/commands.md §5.
+pub fn exec_json(result: &xlightcli_runtime::ExecOutput) -> Result<(), CliError> {
+    let text = serde_json::to_string(result)
+        .map_err(|e| CliError::other(format!("failed to serialize exec output: {e}")))?;
+    println!("{text}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -5,4 +5,6 @@
 pub mod auth;
 pub mod dev;
 pub mod error;
+pub mod exec;
+pub mod init;
 pub mod provider;

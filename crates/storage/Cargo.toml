@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 time = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

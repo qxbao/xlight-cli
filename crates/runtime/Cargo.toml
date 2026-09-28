@@ -6,6 +6,11 @@ version.workspace = true
 rust-version.workspace = true
 description = "Provider-independent agent runtime: Session, AgentLoop, ContextManager, Scheduler (Phase 1+ skeleton)"
 
+[features]
+# MockProvider-backed RuntimeHandle helper for runtime tests (docs/PLAN.md §16) and for `tui`'s
+# own tests to depend on without pulling in a real provider crate.
+testing = ["xlightcli-provider/testing", "xlightcli-auth/testing"]
+
 [lints]
 workspace = true
 
@@ -22,4 +27,10 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
+time = { workspace = true }

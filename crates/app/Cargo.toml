@@ -50,6 +50,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 secrecy = { workspace = true }
 open = { workspace = true }
+uuid = { workspace = true }
 # Not in [workspace.dependencies]: only needed here, for `auth login`'s "read API key from stdin
 # without echo" requirement (Wave 2 brief). MIT/Apache-2.0, allowed by deny.toml.
 rpassword = "7.5"
@@ -60,5 +61,6 @@ xlightcli-provider = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
+assert_cmd = { workspace = true }
 # Only needed in test code (`AccountInfo::metadata` fixtures below).
 serde_json = { workspace = true }
